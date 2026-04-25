@@ -47,6 +47,9 @@
     "storybook": "storybook dev -p 6006",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
+  "dependencies": {
+    "@puckeditor/core": "^0.21.2"
+  },
   "devDependencies": {
     "@eslint/js": "^9.36.0",
     "@storybook/addon-docs": "next",
