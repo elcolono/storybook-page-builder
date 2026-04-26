@@ -1,8 +1,9 @@
 import '@puckeditor/core/puck.css';
 
 import { Puck, type Config, type Data, type Slot } from '@puckeditor/core';
-import React, { useEffect, useId, useMemo, useState } from 'react';
-import { Button, H1, Link, Placeholder } from 'storybook/internal/components';
+import React, { useEffect, useId, useState } from 'react';
+import { EditIcon } from '@storybook/icons';
+import { Button, H1, IconButton, Link, Placeholder } from 'storybook/internal/components';
 import { styled } from 'storybook/theming';
 
 import { STORAGE_KEY } from '../constants';
@@ -14,27 +15,32 @@ interface TabProps {
 const TabWrapper = styled.div(({ theme }) => ({
   background: `linear-gradient(180deg, ${theme.appBg} 0%, ${theme.appContentBg} 100%)`,
   color: theme.textColor,
-  padding: '2rem 20px',
+  width: '100%',
   minHeight: '100vh',
   boxSizing: 'border-box',
+  display: 'flex',
+  flexDirection: 'column',
+  minWidth: 0,
 }));
 
 const TabInner = styled.div({
-  maxWidth: 1440,
-  marginLeft: 'auto',
-  marginRight: 'auto',
+  display: 'flex',
+  flexDirection: 'column',
+  flex: 1,
+  minHeight: 0,
+  minWidth: 0,
+  width: '100%',
 });
 
 const HeaderRow = styled.div(({ theme }) => ({
   display: 'flex',
-  justifyContent: 'space-between',
+  justifyContent: 'flex-end',
   gap: '1rem',
-  alignItems: 'flex-start',
-  marginBottom: '1rem',
-  padding: '1.25rem 1.5rem',
-  border: `1px solid ${theme.appBorderColor}`,
-  borderRadius: 16,
+  alignItems: 'center',
+  padding: '0.75rem 1rem',
+  borderBottom: `1px solid ${theme.appBorderColor}`,
   background: theme.appContentBg,
+  flexShrink: 0,
 }));
 
 const Actions = styled.div({
@@ -46,11 +52,13 @@ const Actions = styled.div({
 });
 
 const BuilderShell = styled.div(({ theme }) => ({
-  border: `1px solid ${theme.appBorderColor}`,
-  borderRadius: 16,
+  flex: 1,
+  minHeight: 0,
+  minWidth: 0,
+  width: '100%',
   background: theme.appContentBg,
   overflow: 'hidden',
-  boxShadow: theme.base === 'light' ? '0 16px 60px rgba(15, 23, 42, 0.08)' : 'none',
+  boxShadow: theme.base === 'light' ? 'inset 0 1px 0 rgba(15, 23, 42, 0.03)' : 'none',
 }));
 
 const Note = styled.p(({ theme }) => ({
@@ -79,13 +87,43 @@ const StatusText = styled.span(({ theme }) => ({
   fontSize: 12,
 }));
 
-const SectionCard = styled.div(({ theme }) => ({
-  border: `1px solid ${theme.appBorderColor}`,
-  borderRadius: 16,
+const ModalBackdrop = styled.div({
+  position: 'fixed',
+  inset: 0,
+  background: 'rgba(15, 23, 42, 0.42)',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  padding: '2rem',
+  zIndex: 1000,
+  backdropFilter: 'blur(4px)',
+});
+
+const ModalCard = styled.div(({ theme }) => ({
+  width: 'min(880px, 100%)',
+  maxHeight: 'min(80vh, 900px)',
   background: theme.appContentBg,
-  padding: '1.25rem 1.5rem',
-  marginTop: '1rem',
+  border: `1px solid ${theme.appBorderColor}`,
+  borderRadius: 18,
+  boxShadow: '0 30px 80px rgba(15, 23, 42, 0.22)',
+  overflow: 'hidden',
+  display: 'flex',
+  flexDirection: 'column',
 }));
+
+const ModalHeader = styled.div(({ theme }) => ({
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: '1rem',
+  padding: '1rem 1.25rem',
+  borderBottom: `1px solid ${theme.appBorderColor}`,
+}));
+
+const ModalBody = styled.div({
+  padding: '1.25rem',
+  overflow: 'auto',
+});
 
 type BuilderComponentDefinition = {
   label: string;
@@ -425,11 +463,11 @@ const builderConfig: Config = {
       <main
         style={{
           minHeight: '100%',
-          padding: '2rem',
+          padding: '2rem 0',
           background: 'linear-gradient(180deg, #ffffff 0%, #eff6ff 100%)',
         }}
       >
-        <div style={{ maxWidth: 1120, margin: '0 auto' }}>
+        <div style={{ width: '100%' }}>
           <header style={{ marginBottom: '1.5rem' }}>
             <div
               style={{
@@ -548,6 +586,7 @@ export const Tab: React.FC<TabProps> = ({ active }) => {
     JSON.stringify(normalizeBuilderData(initialData), null, 2),
   );
   const [status, setStatus] = useState('Ready');
+  const [isJsonModalOpen, setIsJsonModalOpen] = useState(false);
 
   useEffect(() => {
     if (!active) {
@@ -578,13 +617,23 @@ export const Tab: React.FC<TabProps> = ({ active }) => {
     setSerializedData(JSON.stringify(normalizedData, null, 2));
   }, [active, data]);
 
-  const categorySummary = useMemo(
-    () =>
-      Object.entries(builderRegistry)
-        .map(([, definition]) => `${definition.category}: ${definition.label}`)
-        .join(' · '),
-    [],
-  );
+  useEffect(() => {
+    if (!isJsonModalOpen) {
+      return;
+    }
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsJsonModalOpen(false);
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [isJsonModalOpen]);
 
   if (!active) {
     return null;
@@ -627,20 +676,20 @@ export const Tab: React.FC<TabProps> = ({ active }) => {
     <TabWrapper>
       <TabInner>
         <HeaderRow>
-          <div>
-            <H1 style={{ margin: 0 }}>Page Builder</H1>
-            <Note>
-              Puck now powers the addon tab directly. This MVP keeps the registry intentionally small, stores edits in
-              <code> localStorage </code>, and proves nested composition inside Storybook.
-            </Note>
-            <Note style={{ marginTop: '0.5rem' }}>Available components: {categorySummary}</Note>
-          </div>
           <Actions>
             <Button onClick={resetData}>Reset</Button>
             <Button onClick={copyJson}>Copy JSON</Button>
             <Button primary onClick={importJson}>
               Import JSON
             </Button>
+            <IconButton
+              title="Open JSON workspace"
+              onClick={() => {
+                setIsJsonModalOpen(true);
+              }}
+            >
+              <EditIcon />
+            </IconButton>
           </Actions>
         </HeaderRow>
 
@@ -656,46 +705,63 @@ export const Tab: React.FC<TabProps> = ({ active }) => {
               setData(normalizeBuilderData(nextData as BuilderData));
               setStatus('Publish triggered and draft saved locally');
             }}
-            height="calc(100vh - 240px)"
+            height="calc(100vh - 58px)"
             viewports={[
-              { width: 375, label: 'Mobile', icon: 'Smartphone' },
-              { width: 768, label: 'Tablet', icon: 'Tablet' },
               { width: 1200, label: 'Desktop', icon: 'Monitor' },
+              { width: 768, label: 'Tablet', icon: 'Tablet' },
+              { width: 375, label: 'Mobile', icon: 'Smartphone' },
             ]}
           />
         </BuilderShell>
-
-        <SectionCard>
-          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'center' }}>
-            <div>
-              <H1 style={{ fontSize: '1.25rem', margin: 0 }}>JSON Workspace</H1>
-              <Note style={{ marginTop: '0.5rem' }}>
-                Edit the payload manually, then use <strong>Import JSON</strong> to load it back into Puck. The current
-                draft is also copied here automatically.
-              </Note>
-            </div>
-            <StatusText>{status}</StatusText>
-          </div>
-          <label htmlFor={textareaId} style={{ display: 'block', margin: '1rem 0 0.5rem', fontWeight: 700 }}>
-            Current builder payload
-          </label>
-          <ImportArea
-            id={textareaId}
-            value={serializedData}
-            onChange={(event) => {
-              setSerializedData(event.target.value);
-            }}
-            spellCheck={false}
-          />
-          <Placeholder style={{ marginTop: '1rem' }}>
-            Want to evolve this next? The clean follow-up would be a project-level builder registry API, then optional
-            mapping from Storybook component metadata into that registry.
-            <div style={{ marginTop: '0.5rem' }}>
-              Puck docs: <Link href="https://puckeditor.com/docs/getting-started">Getting Started</Link>
-            </div>
-          </Placeholder>
-        </SectionCard>
       </TabInner>
+      {isJsonModalOpen ? (
+        <ModalBackdrop
+          onClick={() => {
+            setIsJsonModalOpen(false);
+          }}
+        >
+          <ModalCard
+            onClick={(event) => {
+              event.stopPropagation();
+            }}
+          >
+            <ModalHeader>
+              <div>
+                <H1 style={{ fontSize: '1.25rem', margin: 0 }}>JSON Workspace</H1>
+                <Note style={{ marginTop: '0.35rem' }}>
+                  Edit the payload manually, then use <strong>Import JSON</strong> to load it back into Puck.
+                </Note>
+              </div>
+              <Actions>
+                <StatusText>{status}</StatusText>
+                <Button
+                  onClick={() => {
+                    setIsJsonModalOpen(false);
+                  }}
+                >
+                  Close
+                </Button>
+              </Actions>
+            </ModalHeader>
+            <ModalBody>
+              <label htmlFor={textareaId} style={{ display: 'block', margin: '0 0 0.5rem', fontWeight: 700 }}>
+                Current builder payload
+              </label>
+              <ImportArea
+                id={textareaId}
+                value={serializedData}
+                onChange={(event) => {
+                  setSerializedData(event.target.value);
+                }}
+                spellCheck={false}
+              />
+              <Placeholder style={{ marginTop: '1rem' }}>
+                Puck docs: <Link href="https://puckeditor.com/docs/getting-started">Getting Started</Link>
+              </Placeholder>
+            </ModalBody>
+          </ModalCard>
+        </ModalBackdrop>
+      ) : null}
     </TabWrapper>
   );
 };
