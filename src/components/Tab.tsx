@@ -16,7 +16,8 @@ const TabWrapper = styled.div(({ theme }) => ({
   background: `linear-gradient(180deg, ${theme.appBg} 0%, ${theme.appContentBg} 100%)`,
   color: theme.textColor,
   width: '100%',
-  minHeight: '100vh',
+  height: '100%',
+  minHeight: 0,
   boxSizing: 'border-box',
   display: 'flex',
   flexDirection: 'column',
@@ -31,17 +32,6 @@ const TabInner = styled.div({
   minWidth: 0,
   width: '100%',
 });
-
-const HeaderRow = styled.div(({ theme }) => ({
-  display: 'flex',
-  justifyContent: 'flex-end',
-  gap: '1rem',
-  alignItems: 'center',
-  padding: '0.75rem 1rem',
-  borderBottom: `1px solid ${theme.appBorderColor}`,
-  background: theme.appContentBg,
-  flexShrink: 0,
-}));
 
 const Actions = styled.div({
   display: 'flex',
@@ -670,35 +660,9 @@ export const Tab: React.FC<TabProps> = ({ active }) => {
     setStatus('Imported JSON into the builder');
   };
 
-  const resetData = () => {
-    window.localStorage.removeItem(STORAGE_KEY);
-    const normalizedInitialData = normalizeBuilderData(initialData);
-    setData(normalizedInitialData);
-    setSerializedData(JSON.stringify(normalizedInitialData, null, 2));
-    setStatus('Reset to the initial demo page');
-  };
-
   return (
     <TabWrapper>
       <TabInner>
-        <HeaderRow>
-          <Actions>
-            <Button onClick={resetData}>Reset</Button>
-            <Button onClick={copyJson}>Copy JSON</Button>
-            <Button primary onClick={importJson}>
-              Import JSON
-            </Button>
-            <IconButton
-              title="Open JSON workspace"
-              onClick={() => {
-                setIsJsonModalOpen(true);
-              }}
-            >
-              <EditIcon />
-            </IconButton>
-          </Actions>
-        </HeaderRow>
-
         <BuilderShell>
           <Puck
             config={builderConfig}
@@ -711,7 +675,21 @@ export const Tab: React.FC<TabProps> = ({ active }) => {
               setData(normalizeBuilderData(nextData as BuilderData));
               setStatus('Publish triggered and draft saved locally');
             }}
-            height="calc(100vh - 58px)"
+            renderHeaderActions={({ children }) => (
+              <>
+                {children}
+                <IconButton
+                  title="Open JSON workspace"
+                  onClick={() => {
+                    setSerializedData(JSON.stringify(normalizeBuilderData(data), null, 2));
+                    setIsJsonModalOpen(true);
+                  }}
+                >
+                  <EditIcon />
+                </IconButton>
+              </>
+            )}
+            height="100%"
             viewports={editorViewports}
           />
         </BuilderShell>
@@ -736,6 +714,10 @@ export const Tab: React.FC<TabProps> = ({ active }) => {
               </div>
               <Actions>
                 <StatusText>{status}</StatusText>
+                <Button onClick={copyJson}>Copy JSON</Button>
+                <Button primary onClick={importJson}>
+                  Import JSON
+                </Button>
                 <Button
                   onClick={() => {
                     setIsJsonModalOpen(false);
