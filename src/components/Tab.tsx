@@ -135,6 +135,12 @@ type BuilderComponentDefinition = {
 
 type BuilderData = Data;
 
+const editorViewports = [
+  { width: 1200, label: 'Desktop', icon: 'Monitor' },
+  { width: 768, label: 'Tablet', icon: 'Tablet' },
+  { width: 375, label: 'Mobile', icon: 'Smartphone' },
+] as const;
+
 const createItemId = () => {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return crypto.randomUUID();
@@ -706,11 +712,7 @@ export const Tab: React.FC<TabProps> = ({ active }) => {
               setStatus('Publish triggered and draft saved locally');
             }}
             height="calc(100vh - 58px)"
-            viewports={[
-              { width: 1200, label: 'Desktop', icon: 'Monitor' },
-              { width: 768, label: 'Tablet', icon: 'Tablet' },
-              { width: 375, label: 'Mobile', icon: 'Smartphone' },
-            ]}
+            viewports={editorViewports}
           />
         </BuilderShell>
       </TabInner>
