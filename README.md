@@ -1,14 +1,31 @@
 # Storybook Page Builder
 
-`storybook-page-builder` is an experimental Storybook addon that embeds [Puck](https://puckeditor.com/) directly into a custom Storybook tab. The current MVP is a focused spike: a small curated component registry, nested layout support, and local draft persistence.
+`storybook-page-builder` is a React-focused Storybook addon that embeds [Puck](https://puckeditor.com/) into a dedicated Storybook tab and auto-discovers builder-friendly stories out of the box.
 
-## Current MVP
+## What It Does
 
-- Puck rendered inside a dedicated Storybook tab
-- Manual builder registry for a small React component set
-- Nested editing with slot-based layout blocks
-- Draft persistence in `localStorage`
-- JSON copy/import workflow for quick experimentation
+- Reads the Storybook index in the manager and turns builder-friendly stories into Puck sidebar entries
+- Maps simple Storybook `args` and `argTypes` to editable Puck fields
+- Renders discovered stories through Storybook preview so the canvas shows real Storybook-backed output
+- Persists draft builder data in `localStorage`
+- Keeps a JSON workspace available for quick import/export while iterating
+
+## Supported Auto-Mapping
+
+The first cut intentionally focuses on primitive, serializable controls:
+
+- `string` -> `text` or `textarea`
+- `boolean` -> radio-style boolean field
+- `number` -> `number`
+- enum/select/radio controls -> `select` or `radio`
+
+These values are skipped safely for now:
+
+- functions
+- objects and arrays
+- render props
+- `ReactNode`
+- implicit slots or `children`
 
 ## Install
 
@@ -29,6 +46,54 @@ const config: StorybookConfig = {
 export default config;
 ```
 
+## Optional Story Overrides
+
+The addon works best when stories already expose simple controls, but teams can refine discovery with `parameters.pageBuilder` on meta or individual stories.
+
+```ts
+import type { Meta, StoryObj } from '@storybook/react';
+import { Button } from './Button';
+
+const meta = {
+  component: Button,
+  title: 'Forms/Button',
+  parameters: {
+    pageBuilder: {
+      category: 'Marketing',
+      excludeArgs: ['onClick'],
+    },
+  },
+} satisfies Meta<typeof Button>;
+
+export default meta;
+
+export const Primary: StoryObj<typeof meta> = {
+  args: {
+    label: 'Save changes',
+    primary: true,
+  },
+  parameters: {
+    pageBuilder: {
+      label: 'Primary Button',
+    },
+  },
+};
+```
+
+Supported keys in `parameters.pageBuilder`:
+
+- `enabled`
+- `label`
+- `category`
+- `fields`
+- `defaultProps`
+- `includeArgs`
+- `excludeArgs`
+- `description`
+- `slots`
+
+`slots` are explicit-only in v1. The addon does not infer `children` or layout regions automatically.
+
 ## Development
 
 ```sh
@@ -46,15 +111,15 @@ Useful scripts:
 
 This repository currently optimizes for a strong technical spike, not a full builder platform. The following are intentionally out of scope for the first cut:
 
-- automatic Storybook story introspection
+- perfect support for every Storybook story shape
+- automatic slot inference
 - file persistence
-- slot/region APIs for external consumers
-- controls synchronization
 - non-React Storybooks
+- advanced control synchronization beyond primitive args
 
 ## Next Likely Steps
 
-- Extract the internal builder registry into a user-facing configuration API
-- Allow projects to register their own components instead of relying on the demo registry
-- Explore mapping a subset of Storybook metadata into that registry
-- Add tests around persistence and invalid JSON recovery
+- Strengthen slot-aware preview rendering for stories that opt into `parameters.pageBuilder.slots`
+- Add broader field mappings for dates, colors, and richer control metadata
+- Introduce higher-level tests around discovery, persistence, and invalid JSON recovery
+- Explore optional global filtering for very large Storybooks
