@@ -21,6 +21,36 @@ const meta: Meta<typeof Button> = {
   <SomeOtherComponent funcProp={(a) => a.id} />
 </MyComponent>
 `,
+    pageBuilder: {
+      label: 'Button',
+      category: 'UI',
+      excludeArgs: ['onClick'],
+      fields: {
+        label: { type: 'text' },
+        primary: {
+          type: 'radio',
+          options: [
+            { label: 'Primary', value: true },
+            { label: 'Secondary', value: false },
+          ],
+        },
+        size: {
+          type: 'select',
+          options: [
+            { label: 'Small', value: 'small' },
+            { label: 'Medium', value: 'medium' },
+            { label: 'Large', value: 'large' },
+          ],
+        },
+        backgroundColor: { type: 'text' },
+      },
+      defaultProps: {
+        label: 'Click me',
+        primary: true,
+        size: 'medium',
+        backgroundColor: '',
+      },
+    },
   },
 };
 

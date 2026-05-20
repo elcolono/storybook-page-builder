@@ -1,71 +1,80 @@
 import '@puckeditor/core/puck.css';
 
-import { Puck, type Config, type Data, type Slot } from '@puckeditor/core';
+import { Puck, type Config, type ConfigParams, type Data, type Viewports } from '@puckeditor/core';
 import { EditIcon } from '@storybook/icons';
-import type { API_PreparedStoryIndex, StoryEntry } from 'storybook/manager-api';
-import { useStorybookApi, useStorybookState } from 'storybook/manager-api';
+import type { API_PreparedIndexEntry, API_PreparedStoryIndex } from 'storybook/internal/types';
+import { addons, useStorybookApi, useStorybookState } from 'storybook/manager-api';
 import { Button, H1, IconButton, Link, Placeholder } from 'storybook/internal/components';
 import React, { useEffect, useId, useMemo, useState } from 'react';
 import { styled } from 'storybook/theming';
 
-import { STORAGE_KEY } from '../constants';
+import {
+  PREVIEW_METADATA_REQUEST,
+  PREVIEW_METADATA_RESPONSE,
+  PREVIEW_METADATA_TIMEOUT_MS,
+  STORAGE_KEY,
+} from '../constants';
+import {
+  isPreviewMetadataResponsePayload,
+  isRecord,
+  isSerializablePrimitive,
+  type BuilderFields,
+  type PreviewMetadataEntry,
+  type PreviewMetadataRequestPayload,
+} from '../metadata';
 
 interface TabProps {
   active?: boolean;
 }
 
-type BuilderData = Data;
-
-type PageBuilderSlots =
-  | string[]
-  | Record<
-      string,
-      {
-        allow?: string[];
-      }
-    >;
-
-type PageBuilderParameter = {
-  enabled?: boolean;
-  label?: string;
-  category?: string;
-  fields?: Record<string, unknown>;
-  defaultProps?: Record<string, unknown>;
-  includeArgs?: string[];
-  excludeArgs?: string[];
+type BuilderComponentProps = Record<string, Record<string, unknown>>;
+type BuilderRootProps = {
+  title?: string;
   description?: string;
-  slots?: PageBuilderSlots;
 };
+type BuilderConfigParams = ConfigParams<BuilderComponentProps, BuilderRootProps, string[]>;
+type BuilderData = Data<BuilderComponentProps, BuilderRootProps>;
+type BuilderConfig = Config<BuilderConfigParams>;
 
-type PrimitiveFieldValue = string | number | boolean;
-
-type DiscoveredBuilderEntry = {
-  storyId: string;
-  title: string;
-  name: string;
+type DiscoveredBuilderEntry = Omit<PreviewMetadataEntry, 'componentBacked'> & {
   label: string;
   category: string;
   description?: string;
-  defaultProps: Record<string, unknown>;
-  fields: NonNullable<Config['components']>[string]['fields'];
-  pageBuilder: PageBuilderParameter;
-  slotNames: string[];
-  unsupportedReason?: string;
 };
 
 type DiscoveredStoryCandidate = {
   entry: DiscoveredBuilderEntry;
-  componentLabel: string;
-  componentCategory: string;
 };
 
 type BuilderComponentDefinition = {
   label: string;
   category: string;
-  fields: NonNullable<Config['components']>[string]['fields'];
+  fields: BuilderFields;
   defaultProps?: Record<string, unknown>;
-  render: NonNullable<Config['components']>[string]['render'];
+  render: (props: Record<string, unknown>) => React.ReactElement;
 };
+
+type MetadataDiscoveryState =
+  | {
+      status: 'idle';
+      entries: PreviewMetadataEntry[];
+    }
+  | {
+      status: 'loading';
+      requestId: string;
+      entries: PreviewMetadataEntry[];
+    }
+  | {
+      status: 'loaded';
+      requestId: string;
+      entries: PreviewMetadataEntry[];
+    }
+  | {
+      status: 'error';
+      requestId: string;
+      entries: PreviewMetadataEntry[];
+      message: string;
+    };
 
 const TabWrapper = styled.div(({ theme }) => ({
   background: `linear-gradient(180deg, ${theme.appBg} 0%, ${theme.appContentBg} 100%)`,
@@ -105,6 +114,14 @@ const BuilderShell = styled.div(({ theme }) => ({
   overflow: 'hidden',
   boxShadow: theme.base === 'light' ? 'inset 0 1px 0 rgba(15, 23, 42, 0.03)' : 'none',
 }));
+
+const PlaceholderFrame = styled.div({
+  padding: '1.5rem',
+});
+
+const ModalHint = styled.div({
+  marginTop: '1rem',
+});
 
 const Note = styled.p(({ theme }) => ({
   margin: 0,
@@ -201,11 +218,11 @@ const StoryPreviewBadge = styled.span({
   fontWeight: 700,
 });
 
-const editorViewports = [
+const editorViewports: Viewports = [
   { width: 1200, label: 'Desktop', icon: 'Monitor' },
   { width: 768, label: 'Tablet', icon: 'Tablet' },
   { width: 375, label: 'Mobile', icon: 'Smartphone' },
-] as const;
+];
 
 const slugify = (value: string) =>
   value
@@ -219,13 +236,13 @@ const getTitleSegments = (title: string) =>
     .map((segment) => segment.trim())
     .filter(Boolean);
 
-const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object';
+const createRequestId = () => {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
 
-const isSerializablePrimitive = (value: unknown): value is PrimitiveFieldValue =>
-  typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean';
-
-const isSerializableValue = (value: unknown): value is PrimitiveFieldValue | null | undefined =>
-  value == null || isSerializablePrimitive(value);
+  return `preview-metadata-${Math.random().toString(36).slice(2, 10)}`;
+};
 
 const createItemId = () => {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -241,95 +258,6 @@ const isComponentRecord = (value: unknown): value is { type: string; props: Reco
   }
 
   return typeof value.type === 'string' && isRecord(value.props);
-};
-
-const getPageBuilderParameter = (parameters: unknown): PageBuilderParameter => {
-  if (!isRecord(parameters) || !isRecord(parameters.pageBuilder)) {
-    return {};
-  }
-
-  return parameters.pageBuilder as PageBuilderParameter;
-};
-
-const getSlotNames = (slots: PageBuilderSlots | undefined) => {
-  if (!slots) {
-    return [];
-  }
-
-  return Array.isArray(slots) ? slots.filter((slot): slot is string => typeof slot === 'string') : Object.keys(slots);
-};
-
-const getControlType = (argType: unknown): string | undefined => {
-  if (!isRecord(argType)) {
-    return undefined;
-  }
-
-  if (typeof argType.control === 'string') {
-    return argType.control;
-  }
-
-  if (isRecord(argType.control) && typeof argType.control.type === 'string') {
-    return argType.control.type;
-  }
-
-  return undefined;
-};
-
-const getControlOptions = (argType: unknown): PrimitiveFieldValue[] | undefined => {
-  if (!isRecord(argType) || !Array.isArray(argType.options)) {
-    return undefined;
-  }
-
-  const options = argType.options.filter(isSerializablePrimitive);
-
-  return options.length > 0 ? options : undefined;
-};
-
-const toFieldOptions = (options: PrimitiveFieldValue[]) =>
-  options.map((option) => ({
-    label: typeof option === 'boolean' ? (option ? 'True' : 'False') : String(option),
-    value: option,
-  }));
-
-const inferField = (argName: string, argType: unknown, value: unknown) => {
-  const controlType = getControlType(argType);
-  const options = getControlOptions(argType);
-
-  if (options && controlType === 'radio') {
-    return {
-      type: 'radio',
-      options: toFieldOptions(options),
-    };
-  }
-
-  if (options) {
-    return {
-      type: 'select',
-      options: toFieldOptions(options),
-    };
-  }
-
-  if (controlType === 'boolean' || typeof value === 'boolean') {
-    return {
-      type: 'radio',
-      options: [
-        { label: 'True', value: true },
-        { label: 'False', value: false },
-      ],
-    };
-  }
-
-  if (controlType === 'number' || typeof value === 'number') {
-    return { type: 'number' };
-  }
-
-  if (typeof value === 'string' || controlType === 'text' || controlType === 'color') {
-    const shouldUseTextarea =
-      typeof value === 'string' && (value.length > 120 || argName.toLowerCase().includes('description'));
-    return { type: shouldUseTextarea ? 'textarea' : 'text' };
-  }
-
-  return null;
 };
 
 const normalizeComponentList = (items: unknown, allowedTypes: Set<string>): unknown => {
@@ -365,9 +293,9 @@ const normalizeBuilderData = (value: BuilderData, allowedTypes: Set<string>): Bu
   ...value,
   content: normalizeComponentList(value.content, allowedTypes) as BuilderData['content'],
   zones: value.zones
-    ? Object.fromEntries(
+    ? (Object.fromEntries(
         Object.entries(value.zones).map(([zone, items]) => [zone, normalizeComponentList(items, allowedTypes)]),
-      )
+      ) as BuilderData['zones'])
     : value.zones,
 });
 
@@ -381,7 +309,7 @@ const buildIframeSrc = (storyId: string, props: Record<string, unknown>) => {
   url.searchParams.set('viewMode', 'story');
 
   const argPairs = Object.entries(props).flatMap(([key, value]) => {
-    if (key === 'id' || !isSerializableValue(value)) {
+    if (key === 'id' || value == null || !isSerializablePrimitive(value)) {
       return [];
     }
 
@@ -418,313 +346,6 @@ const StorybookBridgeBlock = ({ entry, props }: { entry: DiscoveredBuilderEntry;
   );
 };
 
-const TextBlock = ({ text, align }: { text: string; align?: 'left' | 'center' | 'right' }) => (
-  <p
-    style={{
-      margin: 0,
-      fontSize: '1rem',
-      lineHeight: 1.7,
-      textAlign: align ?? 'left',
-      color: '#1f2937',
-    }}
-  >
-    {text}
-  </p>
-);
-
-const CardBlock = ({
-  title,
-  eyebrow,
-  background,
-  content: Content,
-}: {
-  title: string;
-  eyebrow?: string;
-  background?: string;
-  content: Slot;
-}) => (
-  <section
-    style={{
-      borderRadius: 20,
-      border: '1px solid rgba(15, 23, 42, 0.08)',
-      background: background ?? '#ffffff',
-      padding: '1.25rem',
-      boxShadow: '0 16px 40px rgba(15, 23, 42, 0.08)',
-    }}
-  >
-    {eyebrow ? (
-      <div
-        style={{
-          marginBottom: '0.5rem',
-          textTransform: 'uppercase',
-          letterSpacing: '0.08em',
-          fontSize: '0.75rem',
-          color: '#64748b',
-          fontWeight: 700,
-        }}
-      >
-        {eyebrow}
-      </div>
-    ) : null}
-    <h3 style={{ margin: '0 0 0.75rem', fontSize: '1.25rem', color: '#0f172a' }}>{title}</h3>
-    <Content minEmptyHeight={80} allow={['Text', 'Button']} />
-  </section>
-);
-
-const SectionBlock = ({
-  title,
-  tone,
-  content: Content,
-}: {
-  title: string;
-  tone?: 'light' | 'brand' | 'dark';
-  content: Slot;
-}) => {
-  const tones = {
-    light: {
-      background: '#f8fafc',
-      border: 'rgba(148, 163, 184, 0.32)',
-      color: '#0f172a',
-    },
-    brand: {
-      background: 'linear-gradient(135deg, #dbeafe 0%, #f8fafc 100%)',
-      border: 'rgba(37, 99, 235, 0.20)',
-      color: '#0f172a',
-    },
-    dark: {
-      background: 'linear-gradient(135deg, #0f172a 0%, #1e293b 100%)',
-      border: 'rgba(148, 163, 184, 0.20)',
-      color: '#f8fafc',
-    },
-  } as const;
-
-  const selectedTone = tones[tone ?? 'light'];
-
-  return (
-    <section
-      style={{
-        padding: '2rem',
-        borderRadius: 28,
-        border: `1px solid ${selectedTone.border}`,
-        background: selectedTone.background,
-        color: selectedTone.color,
-      }}
-    >
-      <div style={{ marginBottom: '1rem', fontSize: '1.5rem', fontWeight: 700 }}>{title}</div>
-      <Content minEmptyHeight={160} allow={['Text', 'Card', 'Button', 'Stack']} />
-    </section>
-  );
-};
-
-const StackBlock = ({ gap, direction, items: Items }: { gap?: number; direction?: 'row' | 'column'; items: Slot }) => (
-  <Items
-    minEmptyHeight={72}
-    allow={['Text', 'Card', 'Button']}
-    style={{
-      display: 'flex',
-      flexDirection: direction ?? 'column',
-      gap: `${gap ?? 16}px`,
-      alignItems: 'stretch',
-    }}
-    collisionAxis={direction === 'row' ? 'x' : 'y'}
-  />
-);
-
-const ButtonBlock = ({ label, variant }: { label: string; variant?: 'primary' | 'secondary' }) => (
-  <button
-    type="button"
-    style={{
-      borderRadius: 999,
-      border: variant === 'secondary' ? '1px solid #94a3b8' : 'none',
-      background: variant === 'secondary' ? '#ffffff' : '#2563eb',
-      color: variant === 'secondary' ? '#0f172a' : '#ffffff',
-      padding: '0.75rem 1rem',
-      fontWeight: 700,
-      cursor: 'pointer',
-    }}
-  >
-    {label}
-  </button>
-);
-
-const fallbackRegistry: Record<string, BuilderComponentDefinition> = {
-  Text: {
-    label: 'Text',
-    category: 'Content',
-    fields: {
-      text: { type: 'textarea' },
-      align: {
-        type: 'radio',
-        options: [
-          { label: 'Left', value: 'left' },
-          { label: 'Center', value: 'center' },
-          { label: 'Right', value: 'right' },
-        ],
-      },
-    },
-    defaultProps: {
-      text: 'Describe your section, highlight a feature, or sketch the story you want to tell.',
-      align: 'left',
-    },
-    render: TextBlock,
-  },
-  Button: {
-    label: 'Button',
-    category: 'Content',
-    fields: {
-      label: { type: 'text' },
-      variant: {
-        type: 'select',
-        options: [
-          { label: 'Primary', value: 'primary' },
-          { label: 'Secondary', value: 'secondary' },
-        ],
-      },
-    },
-    defaultProps: {
-      label: 'Call to action',
-      variant: 'primary',
-    },
-    render: ButtonBlock,
-  },
-  Card: {
-    label: 'Card',
-    category: 'Layout',
-    fields: {
-      eyebrow: { type: 'text' },
-      title: { type: 'text' },
-      background: { type: 'text' },
-      content: {
-        type: 'slot',
-        allow: ['Text', 'Button'],
-      },
-    },
-    defaultProps: {
-      eyebrow: 'Feature',
-      title: 'A reusable card',
-      background: '#ffffff',
-      content: [],
-    },
-    render: CardBlock,
-  },
-  Section: {
-    label: 'Section',
-    category: 'Layout',
-    fields: {
-      title: { type: 'text' },
-      tone: {
-        type: 'select',
-        options: [
-          { label: 'Light', value: 'light' },
-          { label: 'Brand', value: 'brand' },
-          { label: 'Dark', value: 'dark' },
-        ],
-      },
-      content: {
-        type: 'slot',
-        allow: ['Text', 'Card', 'Button', 'Stack'],
-      },
-    },
-    defaultProps: {
-      title: 'New section',
-      tone: 'light',
-      content: [],
-    },
-    render: SectionBlock,
-  },
-  Stack: {
-    label: 'Stack',
-    category: 'Layout',
-    fields: {
-      direction: {
-        type: 'radio',
-        options: [
-          { label: 'Column', value: 'column' },
-          { label: 'Row', value: 'row' },
-        ],
-      },
-      gap: { type: 'number' },
-      items: {
-        type: 'slot',
-        allow: ['Text', 'Card', 'Button'],
-      },
-    },
-    defaultProps: {
-      direction: 'column',
-      gap: 16,
-      items: [],
-    },
-    render: StackBlock,
-  },
-};
-
-const fallbackInitialData: BuilderData = {
-  root: {
-    props: {
-      title: 'Storybook Page Builder',
-      description:
-        'No builder-friendly Storybook stories were discovered yet. The fallback demo registry is active while you add simple args, argTypes or parameters.pageBuilder metadata.',
-    },
-  },
-  content: [
-    {
-      type: 'Section',
-      props: {
-        id: 'section-hero',
-        title: 'Hero section',
-        tone: 'brand',
-        content: [
-          {
-            type: 'Text',
-            props: {
-              id: 'text-hero-copy',
-              text: 'Use this editor to combine a small set of curated components and prove the Storybook integration.',
-              align: 'left',
-            },
-          },
-          {
-            type: 'Stack',
-            props: {
-              id: 'stack-hero-actions',
-              direction: 'row',
-              gap: 16,
-              items: [
-                {
-                  type: 'Card',
-                  props: {
-                    id: 'card-nested-proof',
-                    eyebrow: 'Nested',
-                    title: 'Card inside a section',
-                    background: '#ffffff',
-                    content: [
-                      {
-                        type: 'Text',
-                        props: {
-                          id: 'text-card-copy',
-                          text: 'This card is editable and lives inside a slot-powered layout.',
-                          align: 'left',
-                        },
-                      },
-                    ],
-                  },
-                },
-                {
-                  type: 'Button',
-                  props: {
-                    id: 'button-primary-action',
-                    label: 'Primary action',
-                    variant: 'primary',
-                  },
-                },
-              ],
-            },
-          },
-        ],
-      },
-    },
-  ],
-};
-
 const getEmptyInitialData = (): BuilderData => ({
   root: {
     props: {
@@ -739,13 +360,13 @@ const getEmptyInitialData = (): BuilderData => ({
 const createBuilderConfig = (
   registry: Record<string, BuilderComponentDefinition>,
   categories: Record<string, { title: string; components: string[] }>,
-): Config => ({
+): BuilderConfig => ({
   components: Object.fromEntries(
     Object.entries(registry).map(([type, definition]) => [
       type,
       {
         label: definition.label,
-        fields: definition.fields,
+        fields: definition.fields as NonNullable<BuilderConfig['components']>[string]['fields'],
         defaultProps: definition.defaultProps,
         render: definition.render,
       },
@@ -797,111 +418,27 @@ const createBuilderConfig = (
   },
 });
 
-const buildDiscoveredEntry = (
-  story: StoryEntry,
-  indexEntry: Record<string, unknown>,
-): DiscoveredBuilderEntry | null => {
-  const pageBuilder = getPageBuilderParameter(story.parameters);
-
-  if (pageBuilder.enabled === false) {
-    return null;
-  }
-
-  const slotNames = getSlotNames(pageBuilder.slots);
-  const explicitFields = isRecord(pageBuilder.fields)
-    ? (pageBuilder.fields as NonNullable<Config['components']>[string]['fields'])
-    : {};
-  const explicitDefaultProps = isRecord(pageBuilder.defaultProps) ? pageBuilder.defaultProps : {};
-  const storyArgs = isRecord(story.args) ? story.args : {};
-  const argTypes = isRecord(story.argTypes) ? story.argTypes : {};
-  const includeArgs = Array.isArray(pageBuilder.includeArgs) ? new Set(pageBuilder.includeArgs) : null;
-  const excludeArgs = new Set(Array.isArray(pageBuilder.excludeArgs) ? pageBuilder.excludeArgs : []);
-  const candidateArgNames = new Set([
-    ...Object.keys(storyArgs),
-    ...Object.keys(argTypes),
-    ...Object.keys(explicitFields),
-  ]);
-  const fields: NonNullable<Config['components']>[string]['fields'] = {};
-  const defaultProps: Record<string, unknown> = {};
-
-  candidateArgNames.forEach((argName) => {
-    if (slotNames.includes(argName) || excludeArgs.has(argName)) {
-      return;
-    }
-
-    if (includeArgs && !includeArgs.has(argName) && !(argName in explicitFields)) {
-      return;
-    }
-
-    const explicitField = explicitFields[argName];
-    const inferredField = explicitField ?? inferField(argName, argTypes[argName], storyArgs[argName]);
-
-    if (!inferredField) {
-      return;
-    }
-
-    fields[argName] = inferredField;
-
-    if (argName in explicitDefaultProps) {
-      defaultProps[argName] = explicitDefaultProps[argName];
-      return;
-    }
-
-    if (isSerializableValue(storyArgs[argName])) {
-      defaultProps[argName] = storyArgs[argName];
-    }
-  });
-
-  let unsupportedReason: string | undefined;
-
-  if (slotNames.length > 0) {
-    unsupportedReason =
-      'This story declares pageBuilder slots. Slot-aware rendering is not wired for this story shape yet, so the bridge shows a safe placeholder instead of crashing.';
-  } else if (Object.keys(fields).length === 0) {
-    unsupportedReason =
-      'No supported primitive controls were detected. Add simple args/argTypes or override fields with parameters.pageBuilder.';
-  }
-
-  if (!unsupportedReason && typeof indexEntry.componentPath !== 'string' && typeof story.importPath !== 'string') {
-    unsupportedReason = 'Storybook did not expose component-backed metadata for this story.';
-  }
-
-  if (Object.keys(fields).length === 0 && !unsupportedReason) {
-    return null;
-  }
-
-  return {
-    storyId: story.id,
-    title: story.title,
-    name: story.name,
-    label: pageBuilder.label ?? story.name,
-    category: pageBuilder.category ?? story.title,
-    description: pageBuilder.description,
-    defaultProps,
-    fields,
-    pageBuilder,
-    slotNames,
-    unsupportedReason,
-  };
-};
-
-const getComponentLabel = (entry: DiscoveredBuilderEntry) => {
+const getComponentLabel = (entry: PreviewMetadataEntry) => {
   const titleSegments = getTitleSegments(entry.title);
 
-  return titleSegments.at(-1) ?? entry.label;
+  return entry.pageBuilder.label ?? titleSegments.at(-1) ?? entry.name;
 };
 
-const getComponentCategory = (entry: DiscoveredBuilderEntry) => {
+const getComponentCategory = (entry: PreviewMetadataEntry) => {
+  if (entry.pageBuilder.category) {
+    return entry.pageBuilder.category;
+  }
+
   const titleSegments = getTitleSegments(entry.title);
 
   if (titleSegments.length <= 1) {
-    return entry.category;
+    return entry.title;
   }
 
   return titleSegments.slice(0, -1).join(' / ');
 };
 
-const getStoryPriority = (entry: DiscoveredBuilderEntry) => {
+const getStoryPriority = (entry: Pick<PreviewMetadataEntry, 'name'>) => {
   const normalizedName = entry.name.toLowerCase().replace(/\s+/g, '');
 
   if (normalizedName === 'default') {
@@ -919,33 +456,21 @@ const getStoryPriority = (entry: DiscoveredBuilderEntry) => {
   return 10;
 };
 
-const discoverBuilderEntries = (index: API_PreparedStoryIndex | undefined, api: ReturnType<typeof useStorybookApi>) => {
-  if (!index) {
-    return null;
-  }
-
-  const candidates = Object.values(index.entries)
-    .filter((entry) => entry.type === 'story' && entry.subtype === 'story')
+const discoverBuilderEntries = (metadataEntries: PreviewMetadataEntry[]) => {
+  const candidates = metadataEntries
+    .filter((entry) => entry.componentBacked)
     .map((entry) => {
-      const story = api.getData(entry.id) as StoryEntry | undefined;
-
-      if (!story || story.type !== 'story') {
-        return null;
-      }
-
-      const discoveredEntry = buildDiscoveredEntry(story, entry as unknown as Record<string, unknown>);
-
-      if (!discoveredEntry) {
-        return null;
-      }
+      const discoveredEntry: DiscoveredBuilderEntry = {
+        ...entry,
+        label: getComponentLabel(entry),
+        category: getComponentCategory(entry),
+        description: entry.pageBuilder.description,
+      };
 
       return {
         entry: discoveredEntry,
-        componentLabel: getComponentLabel(discoveredEntry),
-        componentCategory: getComponentCategory(discoveredEntry),
       } satisfies DiscoveredStoryCandidate;
-    })
-    .filter((candidate): candidate is DiscoveredStoryCandidate => !!candidate);
+    });
 
   const byTitle = new Map<string, DiscoveredStoryCandidate>();
 
@@ -966,11 +491,7 @@ const discoverBuilderEntries = (index: API_PreparedStoryIndex | undefined, api: 
   });
 
   return Array.from(byTitle.values())
-    .map(({ entry, componentCategory, componentLabel }) => ({
-      ...entry,
-      category: componentCategory,
-      label: componentLabel,
-    }))
+    .map(({ entry }) => entry)
     .sort((left, right) => left.category.localeCompare(right.category) || left.label.localeCompare(right.label));
 };
 
@@ -1029,78 +550,166 @@ const parseStoredData = (rawData: string | null, allowedTypes: Set<string>): Bui
   }
 };
 
+const getStoryIndexEntries = (index: API_PreparedStoryIndex | undefined) => {
+  if (!index) {
+    return [];
+  }
+
+  return Object.values(index.entries).filter(
+    (entry): entry is API_PreparedIndexEntry & { id: string; type: 'story'; subtype: 'story' } =>
+      entry.type === 'story' && entry.subtype === 'story',
+  );
+};
+
+const renderDiscoveryPlaceholder = (message: React.ReactNode) => (
+  <TabWrapper>
+    <TabInner>
+      <BuilderShell>
+        <PlaceholderFrame>
+          <Placeholder>{message}</Placeholder>
+        </PlaceholderFrame>
+      </BuilderShell>
+    </TabInner>
+  </TabWrapper>
+);
+
 export const Tab: React.FC<TabProps> = ({ active }) => {
   const api = useStorybookApi();
   const storybookState = useStorybookState();
   const textareaId = useId();
   const storyIndex = api.getIndex() as API_PreparedStoryIndex | undefined;
+  const storyEntries = useMemo(() => getStoryIndexEntries(storyIndex), [storyIndex, storybookState]);
+  const storyIds = useMemo(() => storyEntries.map((entry) => entry.id), [storyEntries]);
+  const storyIdsKey = storyIds.join('|');
 
-  const discoveredEntries = useMemo(() => discoverBuilderEntries(storyIndex, api), [api, storyIndex, storybookState]);
-  const isDiscoveryReady = !!storyIndex;
-  const usingDiscoveredEntries = (discoveredEntries?.length ?? 0) > 0;
-  const shouldUseFallbackRegistry = isDiscoveryReady && !usingDiscoveredEntries;
-  const activeRegistry = useMemo(
-    () => (usingDiscoveredEntries ? createDiscoveredRegistry(discoveredEntries ?? []) : fallbackRegistry),
-    [discoveredEntries, usingDiscoveredEntries],
+  const [metadataState, setMetadataState] = useState<MetadataDiscoveryState>({
+    status: 'idle',
+    entries: [],
+  });
+
+  useEffect(() => {
+    if (!active || !storyIndex) {
+      return;
+    }
+
+    if (storyIds.length === 0) {
+      setMetadataState({
+        status: 'loaded',
+        requestId: 'empty',
+        entries: [],
+      });
+      return;
+    }
+
+    const channel = addons.getChannel();
+    const requestId = createRequestId();
+    let settled = false;
+    const onMetadataResponse = (payload: unknown) => {
+      if (!isPreviewMetadataResponsePayload(payload) || payload.requestId !== requestId) {
+        return;
+      }
+
+      settled = true;
+      window.clearTimeout(timeoutId);
+      channel.off(PREVIEW_METADATA_RESPONSE, onMetadataResponse);
+      setMetadataState({
+        status: 'loaded',
+        requestId,
+        entries: payload.entries,
+      });
+    };
+    const timeoutId = window.setTimeout(() => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      channel.off(PREVIEW_METADATA_RESPONSE, onMetadataResponse);
+      setMetadataState({
+        status: 'error',
+        requestId,
+        entries: [],
+        message: 'Timed out while waiting for Storybook preview metadata.',
+      });
+    }, PREVIEW_METADATA_TIMEOUT_MS);
+    const request: PreviewMetadataRequestPayload = {
+      requestId,
+      storyIds,
+    };
+
+    setMetadataState({
+      status: 'loading',
+      requestId,
+      entries: [],
+    });
+    channel.on(PREVIEW_METADATA_RESPONSE, onMetadataResponse);
+    channel.emit(PREVIEW_METADATA_REQUEST, request);
+
+    return () => {
+      settled = true;
+      window.clearTimeout(timeoutId);
+      channel.off(PREVIEW_METADATA_RESPONSE, onMetadataResponse);
+    };
+  }, [active, storyIds, storyIdsKey, storyIndex]);
+
+  const discoveredEntries = useMemo(
+    () => (metadataState.status === 'loaded' ? discoverBuilderEntries(metadataState.entries) : null),
+    [metadataState],
   );
-  const activeCategories = useMemo(
-    () =>
-      usingDiscoveredEntries
-        ? createDiscoveredCategories(discoveredEntries ?? [])
-        : {
-            layout: {
-              title: 'Layout',
-              components: ['Section', 'Stack', 'Card'],
-            },
-            content: {
-              title: 'Content',
-              components: ['Text', 'Button'],
-            },
-          },
-    [discoveredEntries, usingDiscoveredEntries],
-  );
+  const isDiscoveryReady = !!storyIndex && metadataState.status === 'loaded';
+  const activeRegistry = useMemo(() => createDiscoveredRegistry(discoveredEntries ?? []), [discoveredEntries]);
+  const activeCategories = useMemo(() => createDiscoveredCategories(discoveredEntries ?? []), [discoveredEntries]);
   const builderConfig = useMemo(
     () => createBuilderConfig(activeRegistry, activeCategories),
     [activeCategories, activeRegistry],
   );
   const availableTypes = useMemo(() => new Set(Object.keys(activeRegistry)), [activeRegistry]);
-  const defaultData = useMemo(
-    () => normalizeBuilderData(shouldUseFallbackRegistry ? fallbackInitialData : getEmptyInitialData(), availableTypes),
-    [availableTypes, shouldUseFallbackRegistry],
-  );
+  const registryKey = useMemo(() => Array.from(availableTypes).sort().join('|'), [availableTypes]);
+  const defaultData = useMemo(() => normalizeBuilderData(getEmptyInitialData(), availableTypes), [availableTypes]);
 
   const [data, setData] = useState<BuilderData>(defaultData);
   const [serializedData, setSerializedData] = useState(() => JSON.stringify(defaultData, null, 2));
   const [status, setStatus] = useState('Ready');
+  const [hydratedRegistryKey, setHydratedRegistryKey] = useState<string | null>(null);
   const [isJsonModalOpen, setIsJsonModalOpen] = useState(false);
 
   useEffect(() => {
     if (!active) {
+      setHydratedRegistryKey(null);
+    }
+  }, [active]);
+
+  useEffect(() => {
+    if (!active || !isDiscoveryReady) {
       return;
     }
 
+    setHydratedRegistryKey(null);
     const storedData = parseStoredData(window.localStorage.getItem(STORAGE_KEY), availableTypes);
 
     if (storedData) {
       setData(storedData);
       setSerializedData(JSON.stringify(storedData, null, 2));
       setStatus('Loaded draft from localStorage');
+      setHydratedRegistryKey(registryKey);
       return;
     }
 
     setData(defaultData);
     setSerializedData(JSON.stringify(defaultData, null, 2));
-  }, [active, availableTypes, defaultData]);
+    setStatus('Ready');
+    setHydratedRegistryKey(registryKey);
+  }, [active, availableTypes, defaultData, isDiscoveryReady, registryKey]);
 
   useEffect(() => {
-    if (!active) {
+    if (!active || !isDiscoveryReady || hydratedRegistryKey !== registryKey) {
       return;
     }
 
     const normalizedData = normalizeBuilderData(data, availableTypes);
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(normalizedData));
     setSerializedData(JSON.stringify(normalizedData, null, 2));
-  }, [active, availableTypes, data]);
+  }, [active, availableTypes, data, hydratedRegistryKey, isDiscoveryReady, registryKey]);
 
   useEffect(() => {
     if (!isJsonModalOpen) {
@@ -1124,18 +733,20 @@ export const Tab: React.FC<TabProps> = ({ active }) => {
     return null;
   }
 
-  if (!isDiscoveryReady) {
-    return (
-      <TabWrapper>
-        <TabInner>
-          <BuilderShell>
-            <Placeholder style={{ margin: '1.5rem' }}>
-              Loading Storybook stories for the page builder sidebar.
-            </Placeholder>
-          </BuilderShell>
-        </TabInner>
-      </TabWrapper>
-    );
+  if (!storyIndex) {
+    return renderDiscoveryPlaceholder('Loading Storybook stories for the page builder sidebar.');
+  }
+
+  if (metadataState.status === 'idle' || metadataState.status === 'loading') {
+    return renderDiscoveryPlaceholder('Loading Storybook component metadata for the page builder sidebar.');
+  }
+
+  if (metadataState.status === 'error') {
+    return renderDiscoveryPlaceholder(metadataState.message);
+  }
+
+  if ((discoveredEntries?.length ?? 0) === 0) {
+    return renderDiscoveryPlaceholder('No component-backed Storybook stories were discovered for the page builder.');
   }
 
   const copyJson = async () => {
@@ -1178,20 +789,24 @@ export const Tab: React.FC<TabProps> = ({ active }) => {
               setData(normalizeBuilderData(nextData as BuilderData, availableTypes));
               setStatus('Publish triggered and draft saved locally');
             }}
-            renderHeaderActions={({ children }) => (
-              <>
-                {children}
-                <IconButton
-                  title="Open JSON workspace"
-                  onClick={() => {
-                    setSerializedData(JSON.stringify(normalizeBuilderData(data, availableTypes), null, 2));
-                    setIsJsonModalOpen(true);
-                  }}
-                >
-                  <EditIcon />
-                </IconButton>
-              </>
-            )}
+            renderHeaderActions={(props) => {
+              const actionChildren = (props as { children?: React.ReactNode }).children;
+
+              return (
+                <>
+                  {actionChildren}
+                  <IconButton
+                    title="Open JSON workspace"
+                    onClick={() => {
+                      setSerializedData(JSON.stringify(normalizeBuilderData(data, availableTypes), null, 2));
+                      setIsJsonModalOpen(true);
+                    }}
+                  >
+                    <EditIcon />
+                  </IconButton>
+                </>
+              );
+            }}
             height="100%"
             viewports={editorViewports}
           />
@@ -1212,15 +827,14 @@ export const Tab: React.FC<TabProps> = ({ active }) => {
               <div>
                 <H1 style={{ fontSize: '1.25rem', margin: 0 }}>JSON Workspace</H1>
                 <Note style={{ marginTop: '0.35rem' }}>
-                  {usingDiscoveredEntries
-                    ? 'Edit the builder payload. Storybook-discovered stories stay available in the sidebar and render through Storybook preview.'
-                    : 'No builder-friendly Storybook stories were discovered yet. The fallback demo registry is active until stories expose simple args, argTypes or parameters.pageBuilder.'}
+                  Edit the builder payload. Discovered stories render through the Storybook preview iframe. Add{' '}
+                  <code>parameters.pageBuilder</code> to a story to control its label, fields and defaults.
                 </Note>
               </div>
               <Actions>
                 <StatusText>{status}</StatusText>
                 <Button onClick={copyJson}>Copy JSON</Button>
-                <Button primary onClick={importJson}>
+                <Button variant="solid" onClick={importJson}>
                   Import JSON
                 </Button>
                 <Button
@@ -1233,12 +847,6 @@ export const Tab: React.FC<TabProps> = ({ active }) => {
               </Actions>
             </ModalHeader>
             <ModalBody>
-              {!usingDiscoveredEntries ? (
-                <Placeholder style={{ marginBottom: '1rem' }}>
-                  Add simple serializable story args or <code>parameters.pageBuilder</code> metadata to your Storybook
-                  stories to replace the fallback demo blocks with auto-discovered entries.
-                </Placeholder>
-              ) : null}
               <label htmlFor={textareaId} style={{ display: 'block', margin: '0 0 0.5rem', fontWeight: 700 }}>
                 Current builder payload
               </label>
@@ -1250,13 +858,15 @@ export const Tab: React.FC<TabProps> = ({ active }) => {
                 }}
                 spellCheck={false}
               />
-              <Placeholder style={{ marginTop: '1rem' }}>
-                Builder overrides: use <code>parameters.pageBuilder</code> on meta or stories to refine labels,
-                categories, fields, defaults and explicit slots.
-                <div style={{ marginTop: '0.5rem' }}>
-                  Puck docs: <Link href="https://puckeditor.com/docs/getting-started">Getting Started</Link>
-                </div>
-              </Placeholder>
+              <ModalHint>
+                <Placeholder>
+                  Builder overrides: use <code>parameters.pageBuilder</code> on meta or stories to refine labels,
+                  categories, fields, defaults and explicit slots.
+                  <div style={{ marginTop: '0.5rem' }}>
+                    Puck docs: <Link href="https://puckeditor.com/docs/getting-started">Getting Started</Link>
+                  </div>
+                </Placeholder>
+              </ModalHint>
             </ModalBody>
           </ModalCard>
         </ModalBackdrop>
