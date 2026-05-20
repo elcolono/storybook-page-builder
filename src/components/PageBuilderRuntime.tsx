@@ -1,6 +1,14 @@
 import '@puckeditor/core/puck.css';
 
-import { Puck, type Config, type ConfigParams, type Data, type Overrides, type Viewports } from '@puckeditor/core';
+import {
+  ActionBar,
+  Puck,
+  type Config,
+  type ConfigParams,
+  type Data,
+  type Overrides,
+  type Viewports,
+} from '@puckeditor/core';
 import React, { useEffect, useId, useMemo, useState } from 'react';
 
 import { BUILDER_RUNTIME_STORY_ID, STORAGE_KEY } from '../constants';
@@ -736,10 +744,15 @@ const createBuilderConfig = (
 });
 
 const editorOverrides = {
-  actionBar: () => <></>,
-  componentOverlay: () => (
-    <div aria-hidden="true" style={{ position: 'absolute', inset: 0, background: 'transparent' }} />
+  actionBar: ({ children, parentAction }) => (
+    <ActionBar>
+      <ActionBar.Group>
+        {parentAction}
+        {children}
+      </ActionBar.Group>
+    </ActionBar>
   ),
+  componentOverlay: ({ children }) => <>{children}</>,
 } satisfies Partial<Overrides<BuilderConfig>>;
 
 const renderState = (message: string) => (
