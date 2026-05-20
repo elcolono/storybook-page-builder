@@ -662,7 +662,7 @@ class ComponentBoundary extends React.Component<
 }
 
 const createDiscoveredRegistry = (entries: DiscoveredBuilderEntry[]): Record<string, BuilderComponentDefinition> => {
-  const availableTypes = new Set(entries.map((entry) => entry.storyId));
+  const availableTypes = new Set([...builtInLayoutComponentIds, ...entries.map((entry) => entry.storyId)]);
   const storyRegistry = Object.fromEntries(
     entries.map((entry) => [
       entry.storyId,
