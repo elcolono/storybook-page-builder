@@ -1,6 +1,15 @@
 import '@puckeditor/core/puck.css';
 
 import {
+  ChevronDownIcon,
+  CopyIcon,
+  DocumentIcon,
+  DownloadIcon,
+  FolderIcon,
+  SaveIcon,
+  UploadIcon,
+} from '@storybook/icons';
+import {
   ActionBar,
   Puck,
   type Config,
@@ -9,7 +18,8 @@ import {
   type Overrides,
   type Viewports,
 } from '@puckeditor/core';
-import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 
 import { ACTIVE_BUILD_ID_KEY, BUILDER_RUNTIME_STORY_ID, BUILDS_STORAGE_KEY, STORAGE_KEY } from '../constants';
 import {
@@ -123,10 +133,16 @@ type NameModalState =
       initialName: string;
     };
 
+type HeaderMenuPosition = {
+  top: number;
+  left: number;
+};
+
 const editorViewports: Viewports = [
-  { width: 1200, label: 'Desktop', icon: 'Monitor' },
-  { width: 768, label: 'Tablet', icon: 'Tablet' },
-  { width: 375, label: 'Mobile', icon: 'Smartphone' },
+  { width: 375, height: 'auto', label: 'Mobile', icon: 'Smartphone' },
+  { width: 768, height: 'auto', label: 'Tablet', icon: 'Tablet' },
+  { width: 1280, height: 'auto', label: 'Desktop', icon: 'Monitor' },
+  { width: '100%', height: 'auto', label: 'Full width', icon: 'FullWidth' },
 ];
 
 const builtInLayoutComponentIds = ['builder-section', 'builder-stack', 'builder-grid'];
@@ -237,10 +253,56 @@ const compactTextareaStyle: React.CSSProperties = {
 
 const headerActionsStyle: React.CSSProperties = {
   display: 'flex',
-  flexWrap: 'wrap',
   alignItems: 'center',
   justifyContent: 'flex-end',
   gap: '0.5rem',
+};
+
+const iconTextButtonStyle: React.CSSProperties = {
+  ...textButtonStyle,
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: '0.4rem',
+  whiteSpace: 'nowrap',
+};
+
+const primaryIconTextButtonStyle: React.CSSProperties = {
+  ...iconTextButtonStyle,
+  borderColor: '#2563eb',
+  background: '#2563eb',
+  color: '#ffffff',
+};
+
+const headerMenuContainerStyle: React.CSSProperties = {
+  position: 'relative',
+};
+
+const headerMenuStyle: React.CSSProperties = {
+  position: 'fixed',
+  zIndex: 10000,
+  minWidth: 190,
+  display: 'grid',
+  gap: 2,
+  padding: 6,
+  border: '1px solid #d8e1ee',
+  borderRadius: 8,
+  background: '#ffffff',
+  boxShadow: '0 18px 45px rgba(15, 23, 42, 0.18)',
+};
+
+const headerMenuItemStyle: React.CSSProperties = {
+  display: 'flex',
+  width: '100%',
+  alignItems: 'center',
+  gap: '0.55rem',
+  border: 0,
+  borderRadius: 6,
+  background: 'transparent',
+  color: '#0f172a',
+  padding: '0.55rem 0.65rem',
+  textAlign: 'left',
+  font: '600 13px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+  cursor: 'pointer',
 };
 
 const dangerButtonStyle: React.CSSProperties = {
@@ -1066,6 +1128,8 @@ export const PageBuilderRuntime = () => {
   const importTextareaId = useId();
   const nameInputId = useId();
   const importFileInputRef = useRef<HTMLInputElement | null>(null);
+  const headerActionsMenuRef = useRef<HTMLDivElement | null>(null);
+  const headerActionsMenuButtonRef = useRef<HTMLButtonElement | null>(null);
   const [discoveryState, setDiscoveryState] = useState<DiscoveryState>({ status: 'loading', entries: [] });
   const [data, setData] = useState<BuilderData>(() => getEmptyInitialData());
   const [editorDataRevision, setEditorDataRevision] = useState(0);
@@ -1079,6 +1143,8 @@ export const PageBuilderRuntime = () => {
   const [isJsonModalOpen, setIsJsonModalOpen] = useState(false);
   const [isBuildsModalOpen, setIsBuildsModalOpen] = useState(false);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
+  const [isActionsMenuOpen, setIsActionsMenuOpen] = useState(false);
+  const [headerMenuPosition, setHeaderMenuPosition] = useState<HeaderMenuPosition | null>(null);
   const [nameModalState, setNameModalState] = useState<NameModalState | null>(null);
 
   useEffect(() => {
@@ -1146,6 +1212,27 @@ export const PageBuilderRuntime = () => {
     return normalizedData;
   };
 
+  const updateHeaderMenuPosition = useCallback(() => {
+    const trigger = headerActionsMenuButtonRef.current;
+
+    if (!trigger) {
+      return;
+    }
+
+    const rect = trigger.getBoundingClientRect();
+    const menuWidth = 210;
+    const viewportPadding = 12;
+    const left = Math.max(
+      viewportPadding,
+      Math.min(rect.right - menuWidth, window.innerWidth - menuWidth - viewportPadding),
+    );
+
+    setHeaderMenuPosition({
+      top: rect.bottom + 6,
+      left,
+    });
+  }, []);
+
   useEffect(() => {
     if (discoveryState.status !== 'loaded') {
       return;
@@ -1205,6 +1292,51 @@ export const PageBuilderRuntime = () => {
     setStatus('Ready');
     setHydratedRegistryKey(registryKey);
   }, [availableTypes, defaultData, discoveryState.status, registryKey]);
+
+  useEffect(() => {
+    if (!isActionsMenuOpen) {
+      return;
+    }
+
+    updateHeaderMenuPosition();
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+
+      if (
+        target instanceof Node &&
+        (headerActionsMenuRef.current?.contains(target) || headerActionsMenuButtonRef.current?.contains(target))
+      ) {
+        return;
+      }
+
+      setIsActionsMenuOpen(false);
+      setHeaderMenuPosition(null);
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsActionsMenuOpen(false);
+        setHeaderMenuPosition(null);
+      }
+    };
+
+    const handleViewportChange = () => {
+      updateHeaderMenuPosition();
+    };
+
+    window.addEventListener('pointerdown', handlePointerDown);
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('resize', handleViewportChange);
+    window.addEventListener('scroll', handleViewportChange, true);
+
+    return () => {
+      window.removeEventListener('pointerdown', handlePointerDown);
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('resize', handleViewportChange);
+      window.removeEventListener('scroll', handleViewportChange, true);
+    };
+  }, [isActionsMenuOpen, updateHeaderMenuPosition]);
 
   useEffect(() => {
     if (discoveryState.status !== 'loaded' || hydratedRegistryKey !== registryKey) {
@@ -1522,13 +1654,31 @@ export const PageBuilderRuntime = () => {
     setStatus('Imported JSON');
   };
 
+  const openSaveAsModal = () => {
+    openNameModal({
+      mode: 'save-as',
+      initialName: activeBuild ? `${activeBuild.name} copy` : DEFAULT_BUILD_NAME,
+    });
+  };
+
+  const openJsonModal = () => {
+    setSerializedData(JSON.stringify(normalizeBuilderData(data, availableTypes), null, 2));
+    setIsJsonModalOpen(true);
+  };
+
+  const runHeaderMenuAction = (action: () => void) => {
+    setIsActionsMenuOpen(false);
+    setHeaderMenuPosition(null);
+    action();
+  };
+
   return (
     <div style={runtimeShellStyle}>
       <Puck
         key={`${registryKey}:${activeBuildId ?? 'draft'}:${editorDataRevision}`}
         config={builderConfig}
         data={data}
-        iframe={{ enabled: false }}
+        iframe={{ enabled: true, waitForStyles: true }}
         onChange={(nextData) => {
           setData(normalizeBuilderData(nextData as BuilderData, availableTypes));
           setStatus('Draft saved');
@@ -1538,58 +1688,98 @@ export const PageBuilderRuntime = () => {
         }}
         renderHeaderActions={() => (
           <div style={headerActionsStyle}>
-            <button type="button" style={primaryButtonStyle} onClick={() => saveCurrentBuild()}>
+            <button type="button" style={primaryIconTextButtonStyle} onClick={() => saveCurrentBuild()}>
+              <SaveIcon size={14} />
               Save
             </button>
-            <button
-              type="button"
-              style={textButtonStyle}
-              onClick={() => {
-                openNameModal({
-                  mode: 'save-as',
-                  initialName: activeBuild ? `${activeBuild.name} copy` : DEFAULT_BUILD_NAME,
-                });
-              }}
-            >
-              Save as
-            </button>
-            <button
-              type="button"
-              style={textButtonStyle}
-              onClick={() => {
-                setIsBuildsModalOpen(true);
-              }}
-            >
-              Builds ({builds.length})
-            </button>
-            <button
-              type="button"
-              style={textButtonStyle}
-              onClick={() => {
-                setIsImportModalOpen(true);
-              }}
-            >
-              Import
-            </button>
-            <button type="button" style={textButtonStyle} onClick={exportCurrentBuild}>
-              Export
-            </button>
-            <button
-              type="button"
-              style={textButtonStyle}
-              onClick={() => {
-                setSerializedData(JSON.stringify(normalizeBuilderData(data, availableTypes), null, 2));
-                setIsJsonModalOpen(true);
-              }}
-            >
-              JSON
-            </button>
+            <div style={headerMenuContainerStyle}>
+              <button
+                ref={headerActionsMenuButtonRef}
+                type="button"
+                style={iconTextButtonStyle}
+                aria-haspopup="menu"
+                aria-expanded={isActionsMenuOpen}
+                onClick={() => {
+                  updateHeaderMenuPosition();
+                  setIsActionsMenuOpen((isOpen) => {
+                    if (isOpen) {
+                      setHeaderMenuPosition(null);
+                    }
+
+                    return !isOpen;
+                  });
+                }}
+              >
+                Build actions
+                <ChevronDownIcon size={13} />
+              </button>
+            </div>
           </div>
         )}
         height="100vh"
         overrides={editorOverrides}
         viewports={editorViewports}
       />
+      {isActionsMenuOpen && headerMenuPosition
+        ? createPortal(
+            <div
+              ref={headerActionsMenuRef}
+              role="menu"
+              style={{
+                ...headerMenuStyle,
+                top: headerMenuPosition.top,
+                left: headerMenuPosition.left,
+              }}
+            >
+              <button
+                type="button"
+                role="menuitem"
+                style={headerMenuItemStyle}
+                onClick={() => runHeaderMenuAction(openSaveAsModal)}
+              >
+                <CopyIcon size={15} />
+                Save as
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                style={headerMenuItemStyle}
+                onClick={() => runHeaderMenuAction(() => setIsBuildsModalOpen(true))}
+              >
+                <FolderIcon size={15} />
+                Builds ({builds.length})
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                style={headerMenuItemStyle}
+                onClick={() => runHeaderMenuAction(() => setIsImportModalOpen(true))}
+              >
+                <UploadIcon size={15} />
+                Import
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                style={headerMenuItemStyle}
+                onClick={() => runHeaderMenuAction(exportCurrentBuild)}
+              >
+                <DownloadIcon size={15} />
+                Export
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                style={headerMenuItemStyle}
+                onClick={() => runHeaderMenuAction(openJsonModal)}
+              >
+                <DocumentIcon size={15} />
+                JSON
+              </button>
+            </div>,
+            document.body,
+          )
+        : null}
       {isBuildsModalOpen ? (
         <div
           style={modalBackdropStyle}
