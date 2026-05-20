@@ -9,9 +9,9 @@ import {
   type Overrides,
   type Viewports,
 } from '@puckeditor/core';
-import React, { useEffect, useId, useMemo, useState } from 'react';
+import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
 
-import { BUILDER_RUNTIME_STORY_ID, STORAGE_KEY } from '../constants';
+import { ACTIVE_BUILD_ID_KEY, BUILDER_RUNTIME_STORY_ID, BUILDS_STORAGE_KEY, STORAGE_KEY } from '../constants';
 import {
   buildPreviewMetadataEntry,
   isRecord,
@@ -96,6 +96,33 @@ type DiscoveryState =
       message: string;
     };
 
+type StoredBuildRecord = {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  revision: number;
+  registryKey: string;
+  data: BuilderData;
+};
+
+type BuildExportPayload = {
+  schemaVersion: 1;
+  exportedAt: string;
+  build: StoredBuildRecord;
+};
+
+type NameModalState =
+  | {
+      mode: 'save-as';
+      initialName: string;
+    }
+  | {
+      mode: 'rename';
+      buildId: string;
+      initialName: string;
+    };
+
 const editorViewports: Viewports = [
   { width: 1200, label: 'Desktop', icon: 'Monitor' },
   { width: 768, label: 'Tablet', icon: 'Tablet' },
@@ -103,6 +130,10 @@ const editorViewports: Viewports = [
 ];
 
 const builtInLayoutComponentIds = ['builder-section', 'builder-stack', 'builder-grid'];
+const BUILD_EXPORT_SCHEMA_VERSION = 1;
+const DEFAULT_BUILD_NAME = 'Untitled Build';
+const LEGACY_BUILD_NAME = 'Local Draft';
+const IMPORTED_BUILD_NAME = 'Imported Build';
 
 const runtimeShellStyle: React.CSSProperties = {
   width: '100%',
@@ -163,6 +194,7 @@ const modalBodyStyle: React.CSSProperties = {
 
 const actionsStyle: React.CSSProperties = {
   display: 'flex',
+  flexWrap: 'wrap',
   alignItems: 'center',
   justifyContent: 'flex-end',
   gap: '0.625rem',
@@ -198,6 +230,70 @@ const textareaStyle: React.CSSProperties = {
   font: '12px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
 };
 
+const compactTextareaStyle: React.CSSProperties = {
+  ...textareaStyle,
+  minHeight: 180,
+};
+
+const headerActionsStyle: React.CSSProperties = {
+  display: 'flex',
+  flexWrap: 'wrap',
+  alignItems: 'center',
+  justifyContent: 'flex-end',
+  gap: '0.5rem',
+};
+
+const dangerButtonStyle: React.CSSProperties = {
+  ...textButtonStyle,
+  borderColor: '#fecaca',
+  color: '#b91c1c',
+};
+
+const inputStyle: React.CSSProperties = {
+  width: '100%',
+  minHeight: 40,
+  boxSizing: 'border-box',
+  border: '1px solid #cbd5e1',
+  borderRadius: 6,
+  padding: '0 0.75rem',
+  background: '#ffffff',
+  color: '#0f172a',
+  font: '14px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+};
+
+const helperTextStyle: React.CSSProperties = {
+  margin: '0.35rem 0 0',
+  color: '#64748b',
+  fontSize: 13,
+};
+
+const modalFormStyle: React.CSSProperties = {
+  display: 'grid',
+  gap: '1rem',
+};
+
+const buildListStyle: React.CSSProperties = {
+  display: 'grid',
+  gap: '0.75rem',
+};
+
+const buildItemStyle: React.CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: 'minmax(0, 1fr)',
+  gap: '1rem',
+  alignItems: 'center',
+  border: '1px solid #d8e1ee',
+  borderRadius: 8,
+  padding: '0.875rem',
+  background: '#ffffff',
+};
+
+const buildMetaStyle: React.CSSProperties = {
+  margin: '0.35rem 0 0',
+  color: '#64748b',
+  fontSize: 12,
+};
+
 const slugify = (value: string) =>
   value
     .toLowerCase()
@@ -217,6 +313,58 @@ const createItemId = () => {
 
   return `puck-${Math.random().toString(36).slice(2, 10)}`;
 };
+
+const getNowIso = () => new Date().toISOString();
+
+const normalizeBuildName = (value: string) => value.trim() || DEFAULT_BUILD_NAME;
+
+const getUniqueBuildName = (name: string, builds: StoredBuildRecord[]) => {
+  const normalizedName = normalizeBuildName(name);
+
+  if (!builds.some((build) => build.name === normalizedName)) {
+    return normalizedName;
+  }
+
+  const copyBase = `${normalizedName} copy`;
+
+  if (!builds.some((build) => build.name === copyBase)) {
+    return copyBase;
+  }
+
+  let index = 2;
+
+  while (builds.some((build) => build.name === `${copyBase} ${index}`)) {
+    index += 1;
+  }
+
+  return `${copyBase} ${index}`;
+};
+
+const getStorageErrorMessage = (error: unknown) => {
+  if (
+    error instanceof DOMException &&
+    (error.name === 'QuotaExceededError' || error.name === 'NS_ERROR_DOM_QUOTA_REACHED')
+  ) {
+    return 'localStorage quota exceeded. Export or delete builds before saving.';
+  }
+
+  return 'Could not write to localStorage.';
+};
+
+const formatBuildDate = (value: string) => {
+  const date = new Date(value);
+
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+};
+
+const sanitizeFilename = (value: string) =>
+  `${
+    value
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '') || 'page-builder-build'
+  }.json`;
 
 const getPreviewStoryStore = () => {
   const preview = (globalThis as StorybookPreviewGlobal).__STORYBOOK_PREVIEW__;
@@ -282,19 +430,171 @@ const getEmptyInitialData = (): BuilderData => ({
   content: [],
 });
 
+const parseBuilderDataValue = (value: unknown, allowedTypes: Set<string>): BuilderData | null => {
+  if (!isRecord(value) || !isRecord(value.root) || !Array.isArray(value.content)) {
+    return null;
+  }
+
+  return normalizeBuilderData(value as BuilderData, allowedTypes);
+};
+
 const parseStoredData = (rawData: string | null, allowedTypes: Set<string>): BuilderData | null => {
   if (!rawData) {
     return null;
   }
 
   try {
-    const parsed = JSON.parse(rawData) as BuilderData;
+    return parseBuilderDataValue(JSON.parse(rawData), allowedTypes);
+  } catch {
+    return null;
+  }
+};
 
-    if (!parsed || typeof parsed !== 'object') {
+const createBuildRecord = ({
+  name,
+  data,
+  registryKey,
+  revision = 1,
+  id = createItemId(),
+  createdAt = getNowIso(),
+  updatedAt = createdAt,
+}: {
+  name: string;
+  data: BuilderData;
+  registryKey: string;
+  revision?: number;
+  id?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}): StoredBuildRecord => ({
+  id,
+  name: normalizeBuildName(name),
+  createdAt,
+  updatedAt,
+  revision: Math.max(1, Math.floor(revision)),
+  registryKey,
+  data,
+});
+
+const parseBuildRecord = (value: unknown, allowedTypes: Set<string>): StoredBuildRecord | null => {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const data = parseBuilderDataValue(value.data, allowedTypes);
+
+  if (!data) {
+    return null;
+  }
+
+  const now = getNowIso();
+  const createdAt = typeof value.createdAt === 'string' ? value.createdAt : now;
+  const revision = typeof value.revision === 'number' && Number.isFinite(value.revision) ? value.revision : 1;
+
+  return createBuildRecord({
+    id: typeof value.id === 'string' && value.id.length > 0 ? value.id : createItemId(),
+    name: typeof value.name === 'string' ? value.name : DEFAULT_BUILD_NAME,
+    createdAt,
+    updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : createdAt,
+    registryKey: typeof value.registryKey === 'string' ? value.registryKey : '',
+    revision,
+    data,
+  });
+};
+
+const readStoredBuildCatalog = (allowedTypes: Set<string>) => {
+  const rawBuilds = window.localStorage.getItem(BUILDS_STORAGE_KEY);
+
+  if (rawBuilds == null) {
+    return { builds: [], hasCatalog: false };
+  }
+
+  try {
+    const parsed = JSON.parse(rawBuilds);
+
+    if (!Array.isArray(parsed)) {
+      return { builds: [], hasCatalog: true };
+    }
+
+    return {
+      builds: parsed.flatMap((build) => {
+        const parsedBuild = parseBuildRecord(build, allowedTypes);
+
+        return parsedBuild ? [parsedBuild] : [];
+      }),
+      hasCatalog: true,
+    };
+  } catch {
+    return { builds: [], hasCatalog: true };
+  }
+};
+
+const createExportPayload = (build: StoredBuildRecord): BuildExportPayload => ({
+  schemaVersion: BUILD_EXPORT_SCHEMA_VERSION,
+  exportedAt: getNowIso(),
+  build,
+});
+
+const downloadJson = (filename: string, payload: unknown) => {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+};
+
+const parseImportedBuild = (
+  rawData: string,
+  allowedTypes: Set<string>,
+  registryKey: string,
+  builds: StoredBuildRecord[],
+): StoredBuildRecord | null => {
+  try {
+    const parsed = JSON.parse(rawData);
+    const incomingBuild =
+      isRecord(parsed) && parsed.schemaVersion === BUILD_EXPORT_SCHEMA_VERSION ? parsed.build : null;
+
+    if (isRecord(incomingBuild)) {
+      const data = parseBuilderDataValue(incomingBuild.data, allowedTypes);
+
+      if (!data) {
+        return null;
+      }
+
+      const incomingId = typeof incomingBuild.id === 'string' && incomingBuild.id.length > 0 ? incomingBuild.id : null;
+      const hasIdCollision = incomingId ? builds.some((build) => build.id === incomingId) : false;
+      const incomingName = typeof incomingBuild.name === 'string' ? incomingBuild.name : IMPORTED_BUILD_NAME;
+      const shouldCopyName = hasIdCollision || builds.some((build) => build.name === normalizeBuildName(incomingName));
+      const revision =
+        typeof incomingBuild.revision === 'number' && Number.isFinite(incomingBuild.revision)
+          ? incomingBuild.revision
+          : 1;
+
+      return createBuildRecord({
+        id: hasIdCollision || !incomingId ? createItemId() : incomingId,
+        name: shouldCopyName ? getUniqueBuildName(`${incomingName} copy`, builds) : incomingName,
+        data,
+        registryKey,
+        revision,
+      });
+    }
+
+    const data = parseBuilderDataValue(parsed, allowedTypes);
+
+    if (!data) {
       return null;
     }
 
-    return normalizeBuilderData(parsed, allowedTypes);
+    return createBuildRecord({
+      name: getUniqueBuildName(IMPORTED_BUILD_NAME, builds),
+      data,
+      registryKey,
+    });
   } catch {
     return null;
   }
@@ -763,12 +1063,23 @@ const renderState = (message: string) => (
 
 export const PageBuilderRuntime = () => {
   const textareaId = useId();
+  const importTextareaId = useId();
+  const nameInputId = useId();
+  const importFileInputRef = useRef<HTMLInputElement | null>(null);
   const [discoveryState, setDiscoveryState] = useState<DiscoveryState>({ status: 'loading', entries: [] });
   const [data, setData] = useState<BuilderData>(() => getEmptyInitialData());
+  const [editorDataRevision, setEditorDataRevision] = useState(0);
+  const [builds, setBuilds] = useState<StoredBuildRecord[]>([]);
+  const [activeBuildId, setActiveBuildId] = useState<string | null>(null);
   const [serializedData, setSerializedData] = useState(() => JSON.stringify(getEmptyInitialData(), null, 2));
+  const [importPayload, setImportPayload] = useState('');
+  const [nameValue, setNameValue] = useState('');
   const [status, setStatus] = useState('Ready');
   const [hydratedRegistryKey, setHydratedRegistryKey] = useState<string | null>(null);
   const [isJsonModalOpen, setIsJsonModalOpen] = useState(false);
+  const [isBuildsModalOpen, setIsBuildsModalOpen] = useState(false);
+  const [isImportModalOpen, setIsImportModalOpen] = useState(false);
+  const [nameModalState, setNameModalState] = useState<NameModalState | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -810,6 +1121,30 @@ export const PageBuilderRuntime = () => {
   const availableTypes = useMemo(() => new Set(Object.keys(activeRegistry)), [activeRegistry]);
   const registryKey = useMemo(() => Array.from(availableTypes).sort().join('|'), [availableTypes]);
   const defaultData = useMemo(() => normalizeBuilderData(getEmptyInitialData(), availableTypes), [availableTypes]);
+  const activeBuild = useMemo(
+    () => (activeBuildId ? (builds.find((build) => build.id === activeBuildId) ?? null) : null),
+    [activeBuildId, builds],
+  );
+  const sortedBuilds = useMemo(
+    () =>
+      [...builds].sort((left, right) => {
+        const leftTime = new Date(left.updatedAt).getTime();
+        const rightTime = new Date(right.updatedAt).getTime();
+
+        return rightTime - leftTime;
+      }),
+    [builds],
+  );
+
+  const setEditorData = (nextData: BuilderData) => {
+    const normalizedData = normalizeBuilderData(nextData, availableTypes);
+
+    setData(normalizedData);
+    setSerializedData(JSON.stringify(normalizedData, null, 2));
+    setEditorDataRevision((revision) => revision + 1);
+
+    return normalizedData;
+  };
 
   useEffect(() => {
     if (discoveryState.status !== 'loaded') {
@@ -817,18 +1152,56 @@ export const PageBuilderRuntime = () => {
     }
 
     setHydratedRegistryKey(null);
+    const storedBuildCatalog = readStoredBuildCatalog(availableTypes);
+    const storedBuilds = storedBuildCatalog.builds;
+    const storedActiveBuildId = window.localStorage.getItem(ACTIVE_BUILD_ID_KEY);
     const storedData = parseStoredData(window.localStorage.getItem(STORAGE_KEY), availableTypes);
+    const activeStoredBuild = storedActiveBuildId
+      ? (storedBuilds.find((build) => build.id === storedActiveBuildId) ?? null)
+      : null;
+
+    setBuilds(storedBuilds);
+    setActiveBuildId(activeStoredBuild?.id ?? null);
+
+    if (!storedBuildCatalog.hasCatalog && storedData) {
+      const migratedBuild = createBuildRecord({
+        name: LEGACY_BUILD_NAME,
+        data: storedData,
+        registryKey,
+      });
+
+      try {
+        window.localStorage.setItem(BUILDS_STORAGE_KEY, JSON.stringify([migratedBuild]));
+        window.localStorage.setItem(ACTIVE_BUILD_ID_KEY, migratedBuild.id);
+        setBuilds([migratedBuild]);
+        setActiveBuildId(migratedBuild.id);
+        setEditorData(storedData);
+        setStatus('Migrated local draft');
+        setHydratedRegistryKey(registryKey);
+        return;
+      } catch (error) {
+        setEditorData(storedData);
+        setStatus(getStorageErrorMessage(error));
+        setHydratedRegistryKey(registryKey);
+        return;
+      }
+    }
 
     if (storedData) {
-      setData(storedData);
-      setSerializedData(JSON.stringify(storedData, null, 2));
-      setStatus('Loaded draft from localStorage');
+      setEditorData(storedData);
+      setStatus(activeStoredBuild ? `Loaded autosaved draft for ${activeStoredBuild.name}` : 'Loaded autosaved draft');
       setHydratedRegistryKey(registryKey);
       return;
     }
 
-    setData(defaultData);
-    setSerializedData(JSON.stringify(defaultData, null, 2));
+    if (activeStoredBuild) {
+      setEditorData(activeStoredBuild.data);
+      setStatus(`Loaded ${activeStoredBuild.name}`);
+      setHydratedRegistryKey(registryKey);
+      return;
+    }
+
+    setEditorData(defaultData);
     setStatus('Ready');
     setHydratedRegistryKey(registryKey);
   }, [availableTypes, defaultData, discoveryState.status, registryKey]);
@@ -839,18 +1212,36 @@ export const PageBuilderRuntime = () => {
     }
 
     const normalizedData = normalizeBuilderData(data, availableTypes);
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(normalizedData));
-    setSerializedData(JSON.stringify(normalizedData, null, 2));
-  }, [availableTypes, data, discoveryState.status, hydratedRegistryKey, registryKey]);
+    const nextSerializedData = JSON.stringify(normalizedData, null, 2);
+
+    try {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(normalizedData));
+
+      if (activeBuildId) {
+        window.localStorage.setItem(ACTIVE_BUILD_ID_KEY, activeBuildId);
+      } else {
+        window.localStorage.removeItem(ACTIVE_BUILD_ID_KEY);
+      }
+
+      setSerializedData(nextSerializedData);
+    } catch (error) {
+      setStatus(getStorageErrorMessage(error));
+    }
+  }, [activeBuildId, availableTypes, data, discoveryState.status, hydratedRegistryKey, registryKey]);
 
   useEffect(() => {
-    if (!isJsonModalOpen) {
+    const hasOpenModal = isJsonModalOpen || isBuildsModalOpen || isImportModalOpen || !!nameModalState;
+
+    if (!hasOpenModal) {
       return;
     }
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setIsJsonModalOpen(false);
+        setIsBuildsModalOpen(false);
+        setIsImportModalOpen(false);
+        setNameModalState(null);
       }
     };
 
@@ -859,7 +1250,7 @@ export const PageBuilderRuntime = () => {
     return () => {
       window.removeEventListener('keydown', onKeyDown);
     };
-  }, [isJsonModalOpen]);
+  }, [isBuildsModalOpen, isImportModalOpen, isJsonModalOpen, nameModalState]);
 
   if (discoveryState.status === 'loading') {
     return renderState('Loading Storybook components.');
@@ -872,6 +1263,239 @@ export const PageBuilderRuntime = () => {
   if (discoveredEntries.length === 0) {
     return renderState('No component-backed Storybook stories were discovered.');
   }
+
+  if (hydratedRegistryKey !== registryKey) {
+    return renderState('Loading saved builds.');
+  }
+
+  const persistBuilds = (nextBuilds: StoredBuildRecord[], nextActiveBuildId: string | null) => {
+    try {
+      window.localStorage.setItem(BUILDS_STORAGE_KEY, JSON.stringify(nextBuilds));
+
+      if (nextActiveBuildId) {
+        window.localStorage.setItem(ACTIVE_BUILD_ID_KEY, nextActiveBuildId);
+      } else {
+        window.localStorage.removeItem(ACTIVE_BUILD_ID_KEY);
+      }
+
+      setBuilds(nextBuilds);
+      setActiveBuildId(nextActiveBuildId);
+
+      return true;
+    } catch (error) {
+      setStatus(getStorageErrorMessage(error));
+      return false;
+    }
+  };
+
+  const openNameModal = (nextState: NameModalState) => {
+    setNameValue(nextState.initialName);
+    setNameModalState(nextState);
+  };
+
+  const saveCurrentBuild = (dataToSave = data) => {
+    const normalizedData = normalizeBuilderData(dataToSave, availableTypes);
+    const now = getNowIso();
+    const currentBuild = activeBuildId ? (builds.find((build) => build.id === activeBuildId) ?? null) : null;
+
+    if (!currentBuild) {
+      const nextBuild = createBuildRecord({
+        name: getUniqueBuildName(DEFAULT_BUILD_NAME, builds),
+        data: normalizedData,
+        registryKey,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      if (persistBuilds([...builds, nextBuild], nextBuild.id)) {
+        setData(normalizedData);
+        setStatus(`Saved ${nextBuild.name}`);
+      }
+
+      return;
+    }
+
+    const nextRevision = currentBuild.revision + 1;
+    const nextBuilds = builds.map((build) =>
+      build.id === currentBuild.id
+        ? {
+            ...build,
+            data: normalizedData,
+            registryKey,
+            updatedAt: now,
+            revision: nextRevision,
+          }
+        : build,
+    );
+
+    if (persistBuilds(nextBuilds, currentBuild.id)) {
+      setData(normalizedData);
+      setStatus(`Saved ${currentBuild.name} rev ${nextRevision}`);
+    }
+  };
+
+  const saveAsBuild = (name: string) => {
+    const normalizedData = normalizeBuilderData(data, availableTypes);
+    const nextBuild = createBuildRecord({
+      name: getUniqueBuildName(name, builds),
+      data: normalizedData,
+      registryKey,
+    });
+
+    if (persistBuilds([...builds, nextBuild], nextBuild.id)) {
+      setData(normalizedData);
+      setStatus(`Saved ${nextBuild.name}`);
+      setNameModalState(null);
+    }
+  };
+
+  const renameBuild = (buildId: string, name: string) => {
+    const buildToRename = builds.find((build) => build.id === buildId);
+
+    if (!buildToRename) {
+      setStatus('Build not found');
+      setNameModalState(null);
+      return;
+    }
+
+    const otherBuilds = builds.filter((build) => build.id !== buildId);
+    const nextName = getUniqueBuildName(name, otherBuilds);
+    const nextBuilds = builds.map((build) =>
+      build.id === buildId
+        ? {
+            ...build,
+            name: nextName,
+            updatedAt: getNowIso(),
+          }
+        : build,
+    );
+
+    if (persistBuilds(nextBuilds, activeBuildId)) {
+      setStatus(`Renamed ${nextName}`);
+      setNameModalState(null);
+    }
+  };
+
+  const submitNameModal = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    if (!nameModalState) {
+      return;
+    }
+
+    if (nameModalState.mode === 'save-as') {
+      saveAsBuild(nameValue);
+      return;
+    }
+
+    renameBuild(nameModalState.buildId, nameValue);
+  };
+
+  const loadBuild = (build: StoredBuildRecord) => {
+    const normalizedData = setEditorData(build.data);
+    setActiveBuildId(build.id);
+
+    try {
+      window.localStorage.setItem(ACTIVE_BUILD_ID_KEY, build.id);
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(normalizedData));
+      setStatus(`Loaded ${build.name}`);
+      setIsBuildsModalOpen(false);
+    } catch (error) {
+      setStatus(getStorageErrorMessage(error));
+    }
+  };
+
+  const duplicateBuild = (build: StoredBuildRecord) => {
+    const duplicatedBuild = createBuildRecord({
+      name: getUniqueBuildName(`${build.name} copy`, builds),
+      data: normalizeBuilderData(build.data, availableTypes),
+      registryKey,
+      revision: build.revision,
+    });
+
+    if (persistBuilds([...builds, duplicatedBuild], duplicatedBuild.id)) {
+      setEditorData(duplicatedBuild.data);
+      setStatus(`Duplicated ${build.name}`);
+    }
+  };
+
+  const deleteBuild = (build: StoredBuildRecord) => {
+    if (!window.confirm(`Delete "${build.name}"? The current canvas draft will be kept.`)) {
+      return;
+    }
+
+    const nextBuilds = builds.filter((candidate) => candidate.id !== build.id);
+    const nextActiveBuildId = activeBuildId === build.id ? null : activeBuildId;
+
+    if (persistBuilds(nextBuilds, nextActiveBuildId)) {
+      setStatus(`Deleted ${build.name}`);
+    }
+  };
+
+  const getCurrentBuildForExport = (): StoredBuildRecord => {
+    const normalizedData = normalizeBuilderData(data, availableTypes);
+    const now = getNowIso();
+
+    if (activeBuild) {
+      return {
+        ...activeBuild,
+        data: normalizedData,
+        registryKey,
+        updatedAt: now,
+      };
+    }
+
+    return createBuildRecord({
+      name: 'Current Draft',
+      data: normalizedData,
+      registryKey,
+      createdAt: now,
+      updatedAt: now,
+    });
+  };
+
+  const exportBuild = (build: StoredBuildRecord) => {
+    downloadJson(sanitizeFilename(build.name), createExportPayload(build));
+    setStatus(`Exported ${build.name}`);
+  };
+
+  const exportCurrentBuild = () => {
+    exportBuild(getCurrentBuildForExport());
+  };
+
+  const importBuildFromPayload = (payload: string) => {
+    const importedBuild = parseImportedBuild(payload, availableTypes, registryKey, builds);
+
+    if (!importedBuild) {
+      setStatus('Import failed. The JSON did not contain a valid build.');
+      return;
+    }
+
+    if (persistBuilds([...builds, importedBuild], importedBuild.id)) {
+      setEditorData(importedBuild.data);
+      setImportPayload('');
+      setIsImportModalOpen(false);
+      setStatus(`Imported ${importedBuild.name}`);
+    }
+  };
+
+  const importSelectedFile = async (file: File | null | undefined) => {
+    if (!file) {
+      return;
+    }
+
+    try {
+      const text = await file.text();
+      setImportPayload(text);
+      importBuildFromPayload(text);
+    } catch {
+      setStatus('Import failed. The selected file could not be read.');
+    } finally {
+      if (importFileInputRef.current) {
+        importFileInputRef.current.value = '';
+      }
+    }
+  };
 
   const copyJson = async () => {
     const nextValue = JSON.stringify(normalizeBuilderData(data, availableTypes), null, 2);
@@ -894,13 +1518,14 @@ export const PageBuilderRuntime = () => {
       return;
     }
 
-    setData(parsed);
+    setEditorData(parsed);
     setStatus('Imported JSON');
   };
 
   return (
     <div style={runtimeShellStyle}>
       <Puck
+        key={`${registryKey}:${activeBuildId ?? 'draft'}:${editorDataRevision}`}
         config={builderConfig}
         data={data}
         iframe={{ enabled: false }}
@@ -909,25 +1534,294 @@ export const PageBuilderRuntime = () => {
           setStatus('Draft saved');
         }}
         onPublish={async (nextData) => {
-          setData(normalizeBuilderData(nextData as BuilderData, availableTypes));
-          setStatus('Publish saved');
+          saveCurrentBuild(normalizeBuilderData(nextData as BuilderData, availableTypes));
         }}
         renderHeaderActions={() => (
-          <button
-            type="button"
-            style={textButtonStyle}
-            onClick={() => {
-              setSerializedData(JSON.stringify(normalizeBuilderData(data, availableTypes), null, 2));
-              setIsJsonModalOpen(true);
-            }}
-          >
-            JSON
-          </button>
+          <div style={headerActionsStyle}>
+            <button type="button" style={primaryButtonStyle} onClick={() => saveCurrentBuild()}>
+              Save
+            </button>
+            <button
+              type="button"
+              style={textButtonStyle}
+              onClick={() => {
+                openNameModal({
+                  mode: 'save-as',
+                  initialName: activeBuild ? `${activeBuild.name} copy` : DEFAULT_BUILD_NAME,
+                });
+              }}
+            >
+              Save as
+            </button>
+            <button
+              type="button"
+              style={textButtonStyle}
+              onClick={() => {
+                setIsBuildsModalOpen(true);
+              }}
+            >
+              Builds ({builds.length})
+            </button>
+            <button
+              type="button"
+              style={textButtonStyle}
+              onClick={() => {
+                setIsImportModalOpen(true);
+              }}
+            >
+              Import
+            </button>
+            <button type="button" style={textButtonStyle} onClick={exportCurrentBuild}>
+              Export
+            </button>
+            <button
+              type="button"
+              style={textButtonStyle}
+              onClick={() => {
+                setSerializedData(JSON.stringify(normalizeBuilderData(data, availableTypes), null, 2));
+                setIsJsonModalOpen(true);
+              }}
+            >
+              JSON
+            </button>
+          </div>
         )}
         height="100vh"
         overrides={editorOverrides}
         viewports={editorViewports}
       />
+      {isBuildsModalOpen ? (
+        <div
+          style={modalBackdropStyle}
+          onClick={() => {
+            setIsBuildsModalOpen(false);
+          }}
+        >
+          <div
+            style={modalCardStyle}
+            onClick={(event) => {
+              event.stopPropagation();
+            }}
+          >
+            <div style={modalHeaderStyle}>
+              <div>
+                <h2 style={{ margin: 0, color: '#0f172a', fontSize: '1.125rem' }}>Builds</h2>
+                <p style={helperTextStyle}>
+                  {activeBuild ? `Active: ${activeBuild.name} rev ${activeBuild.revision}` : 'No active saved build'}
+                </p>
+              </div>
+              <div style={actionsStyle}>
+                <button
+                  type="button"
+                  style={primaryButtonStyle}
+                  onClick={() => {
+                    openNameModal({
+                      mode: 'save-as',
+                      initialName: activeBuild ? `${activeBuild.name} copy` : DEFAULT_BUILD_NAME,
+                    });
+                  }}
+                >
+                  New copy
+                </button>
+                <button
+                  type="button"
+                  style={textButtonStyle}
+                  onClick={() => {
+                    setIsBuildsModalOpen(false);
+                  }}
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+            <div style={modalBodyStyle}>
+              {sortedBuilds.length === 0 ? (
+                <div style={{ color: '#64748b', fontSize: 14 }}>No saved builds yet.</div>
+              ) : (
+                <div style={buildListStyle}>
+                  {sortedBuilds.map((build) => (
+                    <article key={build.id} style={buildItemStyle}>
+                      <div style={{ minWidth: 0 }}>
+                        <h3
+                          style={{
+                            margin: 0,
+                            overflow: 'hidden',
+                            color: '#0f172a',
+                            fontSize: '1rem',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {build.name}
+                        </h3>
+                        <p style={buildMetaStyle}>
+                          Rev {build.revision} · Updated {formatBuildDate(build.updatedAt)}
+                        </p>
+                      </div>
+                      <div style={actionsStyle}>
+                        <button type="button" style={textButtonStyle} onClick={() => loadBuild(build)}>
+                          Load
+                        </button>
+                        <button
+                          type="button"
+                          style={textButtonStyle}
+                          onClick={() => {
+                            openNameModal({
+                              mode: 'rename',
+                              buildId: build.id,
+                              initialName: build.name,
+                            });
+                          }}
+                        >
+                          Rename
+                        </button>
+                        <button type="button" style={textButtonStyle} onClick={() => duplicateBuild(build)}>
+                          Duplicate
+                        </button>
+                        <button type="button" style={textButtonStyle} onClick={() => exportBuild(build)}>
+                          Export
+                        </button>
+                        <button type="button" style={dangerButtonStyle} onClick={() => deleteBuild(build)}>
+                          Delete
+                        </button>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {isImportModalOpen ? (
+        <div
+          style={modalBackdropStyle}
+          onClick={() => {
+            setIsImportModalOpen(false);
+          }}
+        >
+          <div
+            style={modalCardStyle}
+            onClick={(event) => {
+              event.stopPropagation();
+            }}
+          >
+            <div style={modalHeaderStyle}>
+              <div>
+                <h2 style={{ margin: 0, color: '#0f172a', fontSize: '1.125rem' }}>Import build</h2>
+                <p style={helperTextStyle}>{status}</p>
+              </div>
+              <div style={actionsStyle}>
+                <input
+                  ref={importFileInputRef}
+                  type="file"
+                  accept="application/json,.json"
+                  style={{ display: 'none' }}
+                  onChange={(event) => {
+                    void importSelectedFile(event.target.files?.[0]);
+                  }}
+                />
+                <button
+                  type="button"
+                  style={textButtonStyle}
+                  onClick={() => {
+                    importFileInputRef.current?.click();
+                  }}
+                >
+                  Choose file
+                </button>
+                <button
+                  type="button"
+                  style={primaryButtonStyle}
+                  onClick={() => {
+                    importBuildFromPayload(importPayload);
+                  }}
+                >
+                  Import
+                </button>
+                <button
+                  type="button"
+                  style={textButtonStyle}
+                  onClick={() => {
+                    setIsImportModalOpen(false);
+                  }}
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+            <div style={modalBodyStyle}>
+              <label htmlFor={importTextareaId} style={{ display: 'block', margin: '0 0 0.5rem', fontWeight: 700 }}>
+                Paste exported build JSON
+              </label>
+              <textarea
+                id={importTextareaId}
+                value={importPayload}
+                style={compactTextareaStyle}
+                spellCheck={false}
+                onChange={(event) => {
+                  setImportPayload(event.target.value);
+                }}
+              />
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {nameModalState ? (
+        <div
+          style={{ ...modalBackdropStyle, zIndex: 1010 }}
+          onClick={() => {
+            setNameModalState(null);
+          }}
+        >
+          <form
+            style={{ ...modalCardStyle, width: 'min(520px, 100%)' }}
+            onSubmit={submitNameModal}
+            onClick={(event) => {
+              event.stopPropagation();
+            }}
+          >
+            <div style={modalHeaderStyle}>
+              <div>
+                <h2 style={{ margin: 0, color: '#0f172a', fontSize: '1.125rem' }}>
+                  {nameModalState.mode === 'save-as' ? 'Save build as' : 'Rename build'}
+                </h2>
+                <p style={helperTextStyle}>{status}</p>
+              </div>
+            </div>
+            <div style={modalBodyStyle}>
+              <div style={modalFormStyle}>
+                <label htmlFor={nameInputId} style={{ display: 'block', fontWeight: 700 }}>
+                  Build name
+                </label>
+                <input
+                  id={nameInputId}
+                  value={nameValue}
+                  style={inputStyle}
+                  autoFocus
+                  onChange={(event) => {
+                    setNameValue(event.target.value);
+                  }}
+                />
+                <div style={actionsStyle}>
+                  <button
+                    type="button"
+                    style={textButtonStyle}
+                    onClick={() => {
+                      setNameModalState(null);
+                    }}
+                  >
+                    Cancel
+                  </button>
+                  <button type="submit" style={primaryButtonStyle}>
+                    Save
+                  </button>
+                </div>
+              </div>
+            </div>
+          </form>
+        </div>
+      ) : null}
       {isJsonModalOpen ? (
         <div
           style={modalBackdropStyle}
