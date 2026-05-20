@@ -1,3 +1,5 @@
+import { copyFile } from 'node:fs/promises';
+
 import { defineConfig, type Options } from 'tsup';
 
 const NODE_TARGET = 'node20.19'; // Minimum Node version supported by Storybook 10
@@ -62,6 +64,9 @@ export default defineConfig(async () => {
       platform: 'browser',
       target: 'esnext', // we can use esnext for preview entries since the builders will bundle the addon's preview entries again anyway
       dts: true,
+      onSuccess: async () => {
+        await copyFile('./src/runtime-story-template.js', './dist/runtime.stories.js');
+      },
     });
   }
 

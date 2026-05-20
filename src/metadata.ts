@@ -8,6 +8,8 @@ export type PageBuilderSlots =
       string,
       {
         allow?: string[];
+        disallow?: string[];
+        label?: string;
       }
     >;
 
@@ -79,6 +81,30 @@ export const getSlotNames = (slots: PageBuilderSlots | undefined) => {
   }
 
   return Array.isArray(slots) ? slots.filter((slot): slot is string => typeof slot === 'string') : Object.keys(slots);
+};
+
+const getSlotFields = (slots: PageBuilderSlots | undefined): BuilderFields => {
+  if (!slots) {
+    return {};
+  }
+
+  if (Array.isArray(slots)) {
+    return Object.fromEntries(
+      slots.filter((slot): slot is string => typeof slot === 'string').map((slot) => [slot, { type: 'slot' }]),
+    ) as BuilderFields;
+  }
+
+  return Object.fromEntries(
+    Object.entries(slots).map(([slot, options]) => [
+      slot,
+      {
+        type: 'slot',
+        ...(Array.isArray(options.allow) ? { allow: options.allow } : {}),
+        ...(Array.isArray(options.disallow) ? { disallow: options.disallow } : {}),
+        ...(typeof options.label === 'string' ? { label: options.label } : {}),
+      },
+    ]),
+  ) as BuilderFields;
 };
 
 const getControlType = (argType: unknown): string | undefined => {
@@ -171,6 +197,7 @@ export const buildPreviewMetadataEntry = ({
 
   const slotNames = getSlotNames(pageBuilder.slots);
   const explicitFields = isRecord(pageBuilder.fields) ? (pageBuilder.fields as BuilderFields) : {};
+  const slotFields = getSlotFields(pageBuilder.slots);
   const explicitDefaultProps = isRecord(pageBuilder.defaultProps) ? pageBuilder.defaultProps : {};
   const storyArgs = isRecord(args) ? args : {};
   const storyArgTypes = isRecord(argTypes) ? argTypes : {};
@@ -181,7 +208,7 @@ export const buildPreviewMetadataEntry = ({
     ...Object.keys(storyArgTypes),
     ...Object.keys(explicitFields),
   ]);
-  const fields: BuilderFields = {};
+  const fields: BuilderFields = { ...slotFields };
   const defaultProps: Record<string, unknown> = {};
 
   candidateArgNames.forEach((argName) => {
@@ -216,9 +243,6 @@ export const buildPreviewMetadataEntry = ({
 
   if (!componentBacked) {
     unsupportedReason = 'Storybook did not expose component-backed metadata for this story.';
-  } else if (slotNames.length > 0) {
-    unsupportedReason =
-      'This story declares pageBuilder slots. Slot-aware rendering is not wired for this story shape yet, so the bridge shows a safe placeholder instead of crashing.';
   }
 
   return {

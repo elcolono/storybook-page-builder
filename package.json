@@ -92,7 +92,8 @@
     ],
     "previewEntries": [
       "src/preview.ts",
-      "src/index.ts"
+      "src/index.ts",
+      "src/runtime.ts"
     ],
     "nodeEntries": [
       "src/preset.ts"
