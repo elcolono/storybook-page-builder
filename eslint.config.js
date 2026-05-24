@@ -14,6 +14,7 @@ export default [
       'scripts/',
       'coverage/',
       'node_modules/',
+      '.pnpm-store/',
       'storybook-static/',
       'build-storybook.log',
       '.DS_Store',

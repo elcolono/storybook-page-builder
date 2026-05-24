@@ -62,7 +62,13 @@ if ((await $`cat README.md | grep -E ${readmeTestStrings}`.exitCode) == 0) {
  */
 const peerDependencies = Object.keys(packageJson.peerDependencies || {});
 const globalPackages = [...globalManagerPackages, ...globalPreviewPackages];
+const allowedGlobalPeerDependencies = new Set(['react', 'react-dom']);
+
 peerDependencies.forEach((dependency) => {
+  if (allowedGlobalPeerDependencies.has(dependency)) {
+    return;
+  }
+
   if (globalPackages.includes(dependency)) {
     console.error(
       boxen(
