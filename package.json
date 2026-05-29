@@ -1,6 +1,6 @@
 {
   "name": "storybook-page-builder",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Storybook Builder is a visual editor for creating pages and prototypes using existing Storybook components. It lets teams combine, nest, and configure components quickly, preview changes instantly, and turn ideas into reusable UI faster.",
   "keywords": [
     "storybook-addon",
