@@ -4,12 +4,13 @@
   "description": "Storybook Builder is a visual editor for creating pages and prototypes using existing Storybook components. It lets teams combine, nest, and configure components quickly, preview changes instantly, and turn ideas into reusable UI faster.",
   "keywords": [
     "storybook-addon",
-    "react",
-    "page-builder",
+    "design",
     "visual-editor",
+    "page-builder",
     "prototyping",
     "design-systems",
-    "puck"
+    "puck",
+    "react"
   ],
   "homepage": "https://github.com/elcolono/storybook-page-builder#readme",
   "repository": {

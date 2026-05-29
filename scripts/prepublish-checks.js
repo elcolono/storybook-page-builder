@@ -10,6 +10,7 @@ const packageJson = await readFile('./package.json', 'utf8').then(JSON.parse);
 
 const name = packageJson.name;
 const displayName = packageJson.storybook.displayName;
+const keywords = packageJson.keywords || [];
 
 let exitCode = 0;
 $.verbose = false;
@@ -28,6 +29,29 @@ if (name.includes('addon-kit') || displayName.includes('Addon Kit')) {
 
       Please configure appropriate metadata before publishing your addon. For more info, see:
       https://storybook.js.org/docs/react/addons/addon-catalog#addon-metadata`)}`,
+      { padding: 1, borderColor: 'red' },
+    ),
+  );
+
+  exitCode = 1;
+}
+
+/**
+ * Check that Storybook integration catalog metadata is discoverable
+ */
+const catalogCategories = new Set(['appearance', 'code', 'data-state', 'design', 'organize', 'style', 'test']);
+
+if (keywords[0] !== 'storybook-addon' || !catalogCategories.has(keywords[1])) {
+  console.error(
+    boxen(
+      dedent`
+        ${chalk.red.bold('Invalid Storybook catalog keywords')}
+
+        ${chalk.red(dedent`The Storybook integration catalog expects ${chalk.bold('storybook-addon')} as the first keyword
+        followed by the addon's catalog category.
+
+        Use one of: ${Array.from(catalogCategories).join(', ')}`)}
+      `,
       { padding: 1, borderColor: 'red' },
     ),
   );
